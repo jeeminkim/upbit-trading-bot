@@ -56,6 +56,7 @@ const { MessageEmbed } = require('discord.js');
 const orchestrator = require('./lib/strategy/orchestrator');
 const scalpRunner = require('./lib/scalp_independent/scalpRunner');
 const scalpState = require('./lib/scalp_independent/scalpState');
+const systemStatePersistence = require('./lib/systemStatePersistence');
 const tradeHistoryLogger = require('./lib/tradeHistoryLogger');
 const geminiResolvedPath = require.resolve('./lib/gemini');
 const geminiModule = require('./lib/gemini');
@@ -572,6 +573,82 @@ function getRelaxedModeLabel() {
   return `🔓 완화 적용 중 (-${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')})`;
 }
 
+/** 남은 시간(ms) → "HH:mm:ss 남음" */
+function formatRemainingHMS(remainingMs) {
+  if (remainingMs == null || remainingMs <= 0) return null;
+  const totalSec = Math.floor(remainingMs / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')} 남음`;
+}
+
+function getCurrentSystemState() {
+  const st = scalpRunner.getStatus();
+  const scalpRemaining = st?.remainingMs ?? 0;
+  const aggressiveList = scalpEngine.getAggressiveSymbols();
+  const ai_weight = aggressiveList.map((ticker) => ({
+    ticker,
+    endTime: Date.now() + (scalpEngine.getAggressiveSymbolRemainingMs(ticker) || 0)
+  })).filter((x) => x.endTime > Date.now());
+  const relaxedRemaining = StrategyManager.getRelaxedModeRemainingMs();
+  return {
+    scalp_mode: {
+      active: !!(st?.isRunning && scalpRemaining > 0),
+      startTime: st?.endTime != null ? st.endTime - 3 * 60 * 60 * 1000 : null,
+      endTime: st?.isRunning && st?.endTime ? st.endTime : null
+    },
+    ai_weight,
+    soft_criteria: {
+      active: relaxedRemaining > 0,
+      endTime: relaxedRemaining > 0 ? Date.now() + relaxedRemaining : null
+    }
+  };
+}
+
+function persistSystemState() {
+  try {
+    systemStatePersistence.save(getCurrentSystemState());
+  } catch (e) {
+    console.warn('[systemState] persist:', e?.message);
+  }
+}
+
+/** buildCurrentStateEmbed opts에 넣을 모드별 남은 시간 */
+function getModeRemainingOpts() {
+  const st = scalpRunner.getStatus();
+  const aggressiveList = scalpEngine.getAggressiveSymbols();
+  return {
+    scalpRemainingMs: st?.remainingMs ?? 0,
+    aiWeightRemaining: (aggressiveList || []).map((ticker) => ({
+      ticker,
+      remainingMs: scalpEngine.getAggressiveSymbolRemainingMs(ticker) || 0
+    })).filter((x) => x.remainingMs > 0),
+    relaxedRemainingMs: StrategyManager.getRelaxedModeRemainingMs()
+  };
+}
+
+function restoreSystemState() {
+  const loaded = systemStatePersistence.load();
+  const now = Date.now();
+  if (loaded.scalp_mode.active && loaded.scalp_mode.endTime != null && loaded.scalp_mode.endTime > now) {
+    scalpState.restoreFromPersistence(loaded.scalp_mode.endTime);
+    console.log('[Boot] system_state: 초단타 스캘프 모드 복구됨 (만료:', new Date(loaded.scalp_mode.endTime).toISOString(), ')');
+  }
+  (loaded.ai_weight || []).forEach(({ ticker, endTime }) => {
+    if (endTime != null && endTime > now) {
+      const ttlMs = endTime - now;
+      scalpEngine.setAggressiveSymbol(ticker, ttlMs);
+      console.log('[Boot] system_state: AI 가중치 복구', ticker, '(만료:', new Date(endTime).toISOString(), ')');
+    }
+  });
+  if (loaded.soft_criteria.active && loaded.soft_criteria.endTime != null && loaded.soft_criteria.endTime > now) {
+    const ttlMs = loaded.soft_criteria.endTime - now;
+    StrategyManager.setRelaxedMode(ttlMs);
+    console.log('[Boot] system_state: 기준 완화 복구됨 (만료:', new Date(loaded.soft_criteria.endTime).toISOString(), ')');
+  }
+}
+
 /** APENFT·PURSE 제외된 filteredAccounts 기준(upbit.summarizeAccounts). getProfitPct 사용. Discord [📊 현재 상태] 및 emitDashboard 동기화용
  * @param {Object} [opts] - { isEngineRunning, raceHorseStatusLabel 또는 isRaceHorseMode } (미전달 시 최초 기동 표시)
  */
@@ -621,6 +698,19 @@ function buildCurrentStateEmbed(assets, summary, opts) {
   if (relaxedLabel) {
     fields.push({ name: '매매 모드', value: relaxedLabel, inline: true });
   }
+  const scalpRemainingMs = opts?.scalpRemainingMs ?? 0;
+  const aiWeightRemaining = opts?.aiWeightRemaining ?? [];
+  const relaxedRemainingMs = opts?.relaxedRemainingMs ?? 0;
+  const modeTimeLines = [];
+  modeTimeLines.push(`• **초단타 스캘프**: ${scalpRemainingMs > 0 ? formatRemainingHMS(scalpRemainingMs) : '—'}`);
+  if (Array.isArray(aiWeightRemaining) && aiWeightRemaining.length > 0) {
+    modeTimeLines.push(`• **AI 가중치**: ${aiWeightRemaining.map((x) => `${x.ticker} ${formatRemainingHMS(x.remainingMs)}`).join(', ')}`);
+  } else {
+    modeTimeLines.push(`• **AI 가중치**: —`);
+  }
+  modeTimeLines.push(`• **기준 완화**: ${relaxedRemainingMs > 0 ? formatRemainingHMS(relaxedRemainingMs) : '—'}`);
+  fields.push({ name: '⏱ 모드별 남은 시간', value: modeTimeLines.join('\n'), inline: false });
+
   const aiUsage = opts?.aiUsage;
   if (aiUsage && typeof aiUsage.count === 'number' && typeof aiUsage.limit === 'number') {
     fields.push({ name: 'AI 사용량', value: `${aiUsage.count} / ${aiUsage.limit}`, inline: true });
@@ -838,8 +928,11 @@ async function runScalpCycle() {
       const orderableKrw = state.assets && state.assets.orderableKrw != null ? state.assets.orderableKrw : null;
       const pipeline = scalpEngine.runEntryPipeline(snapshot, prevHigh, currentPrice, market, marketContext, orderableKrw);
       const strength = snapshot.strength_proxy_60s != null ? snapshot.strength_proxy_60s : 0.5;
-      const strengthOk = strength >= profile.strength_threshold;
-      const obiOk = (snapshot.obi_topN ?? 0) >= profile.obi_threshold;
+      const effectiveStrengthThreshold = scalpEngine.getEffectiveStrengthThreshold ? scalpEngine.getEffectiveStrengthThreshold(profile, market) : profile.strength_threshold;
+      const strengthOk = strength >= (effectiveStrengthThreshold ?? profile.strength_threshold);
+      const raceHorseScalpOverlap = !!(state.raceHorseActive && scalpRunner.getStatus?.()?.isRunning);
+      const effectiveObiThreshold = scalpEngine.getEffectiveObiThreshold ? scalpEngine.getEffectiveObiThreshold(profile, market, raceHorseScalpOverlap) : profile.obi_threshold;
+      const obiOk = (snapshot.obi_topN ?? 0) >= (effectiveObiThreshold ?? profile.obi_threshold);
       nextScalpState[market] = {
         entryScore: pipeline.score,
         p0GateStatus: pipeline.p0Allowed ? null : pipeline.p0Reason,
@@ -1113,7 +1206,8 @@ async function emitDashboard() {
       raceHorseStatusLabel: getRaceHorseStatusLabel(state.raceHorseActive),
       aggressiveSymbols,
       relaxedModeLabel: getRelaxedModeLabel(),
-      aiUsage: gemini.getDailyUsage ? gemini.getDailyUsage() : null
+      aiUsage: gemini.getDailyUsage ? gemini.getDailyUsage() : null,
+      ...getModeRemainingOpts()
     });
     discordBot.updateStatusMessage(statusEmbed, aggressiveSymbols).catch(() => {});
   }
@@ -1292,6 +1386,8 @@ setInterval(async () => {
   }
   emitDashboard().catch((e) => console.error('emitDashboard:', e.message));
 }, ASSET_POLL_MS);
+
+setInterval(persistSystemState, 60 * 1000);
 
 setInterval(() => {
   fetchFx().catch(() => {});
@@ -1682,7 +1778,8 @@ const initPromise = (async () => {
         raceHorseStatusLabel: getRaceHorseStatusLabel(state.raceHorseActive),
         aggressiveSymbols: scalpEngine.getAggressiveSymbols(),
         relaxedModeLabel: getRelaxedModeLabel(),
-        aiUsage: gemini.getDailyUsage ? gemini.getDailyUsage() : null
+        aiUsage: gemini.getDailyUsage ? gemini.getDailyUsage() : null,
+        ...getModeRemainingOpts()
       });
     },
     engineStart: async () => {
@@ -1741,30 +1838,36 @@ const initPromise = (async () => {
     setRelaxedMode: (ttlMs) => {
       StrategyManager.setRelaxedMode(ttlMs || 4 * 60 * 60 * 1000);
       emitDashboard().catch(() => {});
+      persistSystemState();
     },
     /** [🔓 기준 완화] 4시간 연장 (종료 시각을 현재+4h로 갱신) */
     extendRelaxMode: () => {
       StrategyManager.setRelaxedMode(4 * 60 * 60 * 1000);
       emitDashboard().catch(() => {});
+      persistSystemState();
     },
     /** 독립 초단타 스캘프 봇 상태 (디스코드/대시보드용) */
     getIndependentScalpStatus: () => scalpRunner.getStatus(),
-    /** 독립 스캘프 3시간 시한부 가동 (우선권 SCALP) */
+    /** 독립 스캘프 3시간 시한부 가동 (우선권 SCALP). 기준 완화 중이면 자동 종료 후 스캘프 우선 */
     setIndependentScalpActivate: (mode = 'SUPER_AGGRESSIVE') => {
+      if (StrategyManager.getRelaxedModeRemainingMs() > 0) StrategyManager.setRelaxedMode(0);
       scalpState.activate(mode);
       emitDashboard().catch(() => {});
+      persistSystemState();
       return { success: true, remainingMs: scalpState.getRemainingMs() };
     },
     /** 독립 스캘프 중지 (우선권 MAIN 반납) */
     setIndependentScalpStop: () => {
       scalpState.stop();
       emitDashboard().catch(() => {});
+      persistSystemState();
       return { success: true };
     },
     /** 독립 스캘프 3시간 연장: 남은 시간(ms)이 60분 미만일 때만 expiryTime에 3*60*60*1000 추가 */
     extendIndependentScalp: () => {
       const extended = scalpState.extend();
       emitDashboard().catch(() => {});
+      persistSystemState();
       const remainingMs = scalpState.getRemainingMs();
       return { success: extended, remainingMs };
     },
@@ -1807,7 +1910,8 @@ const initPromise = (async () => {
         raceHorseStatusLabel: getRaceHorseStatusLabel(state.raceHorseActive),
         aggressiveSymbols: scalpEngine.getAggressiveSymbols(),
         relaxedModeLabel: getRelaxedModeLabel(),
-        aiUsage: gemini.getDailyUsage ? gemini.getDailyUsage() : null
+        aiUsage: gemini.getDailyUsage ? gemini.getDailyUsage() : null,
+        ...getModeRemainingOpts()
       });
       const profitPctNum = getProfitPct(assets);
       const totalEval = assets?.totalEvaluationKrw ?? 0;
@@ -2015,6 +2119,7 @@ const initPromise = (async () => {
       if (!symbol || !ALLOWED_AGGRESSIVE_TICKERS.includes(String(symbol).toUpperCase())) return { success: false };
       scalpEngine.setAggressiveSymbol(symbol, 4 * 60 * 60 * 1000);
       emitDashboard().catch(() => {});
+      persistSystemState();
       return { success: true };
     },
     /** 특별 관리 종목 가중치 해지 (4시간 이내에도 즉시 해지 가능) */
@@ -2022,6 +2127,7 @@ const initPromise = (async () => {
       if (!symbol) return { success: false };
       scalpEngine.clearAggressiveSymbol(symbol);
       emitDashboard().catch(() => {});
+      persistSystemState();
       return { success: true };
     },
     /** API 사용량·무료 토큰 모니터링 (OpenAI + Gemini) */
@@ -2596,6 +2702,7 @@ const initPromise = (async () => {
           });
         }
         console.log('[MyScalpBot] 로그인 요청 완료. 온라인 시 "[MyScalpBot] 온라인" 로그 확인.');
+        restoreSystemState();
         startFourHourlyMarketReport(apiKeys.aiAnalysisChannelId);
         startHourlyHealthCheck();
       } catch (e) {
