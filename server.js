@@ -1315,8 +1315,7 @@ setInterval(async () => {
       state.assets = await fetchAssets();
       const orderableKrw = state.assets?.orderableKrw ?? 0;
       const currentPrice = state.prices[market]?.tradePrice ?? state.prices[market]?.trade_price ?? null;
-      const totalEval = state.assets?.totalEvaluationKrw ?? 0;
-      const totalCoinEval = Math.max(0, (totalEval || 0) - (orderableKrw || 0));
+      const totalCoinEval = state.assets?.evaluationKrwForCoins ?? Math.max(0, (state.assets?.totalEvaluationKrw ?? 0) - (orderableKrw || 0));
       const isRaceHorseTimeWindow = StrategyManager.isRaceHorseTimeWindow();
       const symbol = orchResult.signal?.symbol || market.replace('KRW-', '');
       const { amountKrw } = scalpEngine.getBuyOrderAmountKrw({
@@ -1844,7 +1843,7 @@ const initPromise = (async () => {
             { name: '경주마 모드', value: getRaceHorseStatusLabel(state.raceHorseActive), inline: true },
             { name: '상태', value: '데이터 로딩 중… (Upbit API 확인 후 [📊 현재 상태] 버튼으로 새로고침)', inline: false }
           )
-          .setFooter({ text: 'APENFT·PURSE 제외 · 수익률 = ((평가합계+원화)/(총매수+원화)-1)×100' })
+          .setFooter({ text: 'APENFT·PURSE 제외 · 수익률 = (평가손익/총매수)×100 (보유 KRW 제외)' })
           .setTimestamp();
       }
       const gemini = require('./lib/gemini');
@@ -2762,8 +2761,13 @@ const initPromise = (async () => {
 
     if (apiKeys.discordBotToken && apiKeys.discordChannelId) {
       try {
+        restoreSystemState();
+        if (typeof tradeLogger.truncateLogsOlderThanDays === 'function') {
+          const removed = tradeLogger.truncateLogsOlderThanDays(7);
+          if (removed > 0) console.log('[Boot] 로그 7일 초과 라인 정리:', removed, '줄');
+        }
         console.log('[MyScalpBot] 시작 중 (DISCORD_TOKEN/DISCORD_BOT_TOKEN 사용)…');
-        await discordBot.start({
+        const startupPromise = await discordBot.start({
           token: apiKeys.discordBotToken,
           channelId: apiKeys.discordChannelId,
           adminId: apiKeys.discordAdminId || null,
@@ -2777,12 +2781,11 @@ const initPromise = (async () => {
             if (discordBot.sendToChannel) discordBot.sendToChannel('⚠️ API 요청 제한으로 재시도 중').catch(() => {});
           });
         }
-        console.log('[MyScalpBot] 로그인 요청 완료. 온라인 시 "[MyScalpBot] 온라인" 로그 확인.');
-        restoreSystemState();
-        if (typeof tradeLogger.truncateLogsOlderThanDays === 'function') {
-          const removed = tradeLogger.truncateLogsOlderThanDays(7);
-          if (removed > 0) console.log('[Boot] 로그 7일 초과 라인 정리:', removed, '줄');
+        if (startupPromise && typeof startupPromise.then === 'function') {
+          await startupPromise;
+          console.log('[MyScalpBot] 재가동 패널 전송 순서 완료 (역할 A → B → C → [📊 현재 상태]). 메시지 순서: MarketSearchEngine(별도 프로세스) → 역할 A → B → C.');
         }
+        console.log('[MyScalpBot] 로그인 요청 완료. 온라인 시 "[MyScalpBot] 온라인" 로그 확인.');
         startFourHourlyMarketReport(apiKeys.aiAnalysisChannelId);
         startHourlyHealthCheck();
       } catch (e) {
