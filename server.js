@@ -647,6 +647,13 @@ function restoreSystemState() {
     StrategyManager.setRelaxedMode(ttlMs);
     console.log('[Boot] system_state: 기준 완화 복구됨 (만료:', new Date(loaded.soft_criteria.endTime).toISOString(), ')');
   }
+  // 만료된 모드 제거 후 파일 갱신하여 크기 최소화
+  const pruned = systemStatePersistence.pruneExpiredState(loaded);
+  try {
+    systemStatePersistence.save(pruned);
+  } catch (e) {
+    console.warn('[Boot] system_state 정제 저장 실패:', e?.message);
+  }
 }
 
 /** APENFT·PURSE 제외된 filteredAccounts 기준(upbit.summarizeAccounts). getProfitPct 사용. Discord [📊 현재 상태] 및 emitDashboard 동기화용
@@ -1434,6 +1441,9 @@ tradeLogger.scheduleRejectLogCleanup(db, configDefault.CLEANUP_INTERVAL_MS, conf
 tradeLogger.scheduleMemoryCleanup(configDefault.CLEANUP_INTERVAL_MS);
 
 const CLEANUP_INTERVAL_MS = configDefault.CLEANUP_INTERVAL_MS != null ? configDefault.CLEANUP_INTERVAL_MS : 4 * 60 * 60 * 1000;
+const TMP_DIR = path.join(__dirname, 'tmp');
+const CLEANUP_HOUR_4AM = 4; // 매일 새벽 4시(KST) 시스템 최적화
+
 function runDbCleanup() {
   db.cleanupOldNonTrades(4).then((deleted) => {
     if (deleted > 0) {
@@ -1443,6 +1453,65 @@ function runDbCleanup() {
 }
 setTimeout(runDbCleanup, 60 * 1000);
 setInterval(runDbCleanup, CLEANUP_INTERVAL_MS);
+
+/**
+ * 시스템 최적화: tmp/ 삭제, 오래된 로그·거래이력·임시 라벨 정리. 매일 4시 실행.
+ * @returns {Promise<{ freedBytes: number }>}
+ */
+async function performSystemCleanup() {
+  let freedBytes = 0;
+  try {
+    if (fs.existsSync(TMP_DIR) && fs.statSync(TMP_DIR).isDirectory()) {
+      const files = fs.readdirSync(TMP_DIR);
+      for (const f of files) {
+        const full = path.join(TMP_DIR, f);
+        try {
+          const stat = fs.statSync(full);
+          if (stat.isFile()) {
+            freedBytes += stat.size;
+            fs.unlinkSync(full);
+          }
+        } catch (_) {}
+      }
+    }
+    if (typeof tradeLogger.truncateLogsOlderThanDays === 'function') {
+      const logLinesRemoved = tradeLogger.truncateLogsOlderThanDays(7);
+      freedBytes += logLinesRemoved * 200;
+    }
+    if (typeof tradeHistoryLogger.trimTradeHistoryOlderThanDays === 'function') {
+      const tradeLinesRemoved = tradeHistoryLogger.trimTradeHistoryOlderThanDays(30);
+      freedBytes += tradeLinesRemoved * 300;
+    }
+    if (typeof tradeHistoryLogger.cleanupTemporaryLabelsOlderThanHours === 'function') {
+      const labelLinesRemoved = tradeHistoryLogger.cleanupTemporaryLabelsOlderThanHours(24);
+      freedBytes += labelLinesRemoved * 250;
+    }
+    if (typeof tradeHistoryLogger.trimStrategyMemoryToMax === 'function') {
+      const memoryLinesRemoved = tradeHistoryLogger.trimStrategyMemoryToMax();
+      freedBytes += memoryLinesRemoved * 150;
+    }
+    const freedMB = (freedBytes / (1024 * 1024)).toFixed(2);
+    console.log('[Cleanup] 시스템 최적화 완료, 약', freedMB, 'MB 정리됨');
+    if (discordBot && typeof discordBot.sendToChannel === 'function' && apiKeys.discordChannelId) {
+      discordBot.sendToChannel(`🧹 시스템 최적화 완료: ${freedMB}MB 정리됨`).catch(() => {});
+    }
+  } catch (e) {
+    console.warn('[Cleanup] performSystemCleanup:', e?.message);
+  }
+  return { freedBytes };
+}
+
+// 매일 새벽 4시(KST) performSystemCleanup 실행
+let lastCleanupDate = null;
+setInterval(() => {
+  const now = new Date();
+  const kstHour = (now.getUTCHours() + 9) % 24;
+  const today = now.toISOString().slice(0, 10);
+  if (kstHour === CLEANUP_HOUR_4AM && lastCleanupDate !== today) {
+    lastCleanupDate = today;
+    performSystemCleanup().catch((e) => console.warn('[Cleanup] 스케줄 실행 오류:', e?.message));
+  }
+}, 60 * 1000);
 
 setInterval(() => {
   (async () => {
@@ -2707,6 +2776,10 @@ const initPromise = (async () => {
         }
         console.log('[MyScalpBot] 로그인 요청 완료. 온라인 시 "[MyScalpBot] 온라인" 로그 확인.');
         restoreSystemState();
+        if (typeof tradeLogger.truncateLogsOlderThanDays === 'function') {
+          const removed = tradeLogger.truncateLogsOlderThanDays(7);
+          if (removed > 0) console.log('[Boot] 로그 7일 초과 라인 정리:', removed, '줄');
+        }
         startFourHourlyMarketReport(apiKeys.aiAnalysisChannelId);
         startHourlyHealthCheck();
       } catch (e) {
