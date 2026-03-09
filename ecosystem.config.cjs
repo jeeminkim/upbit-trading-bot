@@ -5,6 +5,10 @@
  * - upbit-bot: server.js (대시보드 + 매매 엔진 + 디스코드 봇 통합)
  * - MarketSearchEngine: market_search.js
  *
+ * 재기동: autorestart: true 이므로 process.exit(0) 시 PM2가 자동 재시작합니다.
+ * npm run restart:all (= pm2 restart ecosystem.config.cjs) 와 동일하게
+ * 새 프로세스에서 fetchAssets → 자산 조회·매매 루프가 처음부터 시작됩니다.
+ *
  * 4개 앱(upbit-bot, MarketSearchEngine, discord-operator, market-bot)을 쓰려면:
  *   npm run pm2:main         — 빌드 후 4개 시작
  *   npm run pm2:main:restart — 4개 재기동

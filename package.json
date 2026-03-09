@@ -125,7 +125,8 @@
     "pm2:logs": "npx pm2 logs --lines 300",
     "pm2:logs:err": "npx pm2 logs upbit-bot --err --lines 300",
     "pm2:logs:gemini": "node scripts/show-gemini-diagnostic-log.js",
-    "list-gemini-models": "node scripts/list-gemini-models.js"
+    "list-gemini-models": "node scripts/list-gemini-models.js",
+    "check-api-errors": "node scripts/check-api-errors.js"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

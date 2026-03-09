@@ -14,6 +14,7 @@
  */
 
 const path = require('path');
+const { exec } = require('child_process');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 // PM2 안정화: Unhandled Rejection/Exception 시 프로세스 종료 방지 (online 유지)
@@ -96,6 +97,7 @@ function loadApiKeys() {
       base.discordBotToken = base.discordBotToken || config.discord_token || config.discord_bot_token || '';
       base.discordChannelId = base.discordChannelId || config.channel_id || config.discord_channel_id || '';
       base.discordAdminId = normalizeAdminId(process.env.ADMIN_ID || process.env.DISCORD_ADMIN_ID || config.admin_id || config.discord_admin_id || '');
+      base.discordAdminDiscordId = normalizeAdminId(process.env.ADMIN_DISCORD_ID || config.discord_admin_discord_id || '');
       base.accessKeyMini = fromEnv('UPBIT_ACCESS_KEY_MINI', '');
       base.secretKeyMini = fromEnv('UPBIT_SECRET_KEY_MINI', '');
       return base;
@@ -106,6 +108,7 @@ function loadApiKeys() {
   base.accessKey = fromEnv('UPBIT_ACCESS_KEY', '');
   base.secretKey = fromEnv('UPBIT_SECRET_KEY', '');
   base.discordAdminId = normalizeAdminId(process.env.ADMIN_ID || process.env.DISCORD_ADMIN_ID || '');
+  base.discordAdminDiscordId = normalizeAdminId(process.env.ADMIN_DISCORD_ID || '');
   base.accessKeyMini = fromEnv('UPBIT_ACCESS_KEY_MINI', '');
   base.secretKeyMini = fromEnv('UPBIT_SECRET_KEY_MINI', '');
   return base;
@@ -156,6 +159,7 @@ const apiKeys = new Proxy(apiKeysRaw, {
   }
 });
 console.log('[Check] ADMIN_ID loaded:', process.env.ADMIN_ID ? 'Yes' : 'No');
+console.log('[Check] ADMIN_DISCORD_ID (역할 C 인프라):', process.env.ADMIN_DISCORD_ID ? 'Yes' : 'No (ADMIN_ID 사용)');
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
@@ -800,6 +804,7 @@ async function runScalpCycle() {
 
     const profile = scalpEngine.getProfile();
     const nextScalpState = {};
+    state.lastSnapshots = state.lastSnapshots || {};
 
     for (const market of SCALP_MARKETS) {
       // 종목별 독립: RSI·볼린저·strength·OBI·entry pipeline 계산
@@ -809,6 +814,7 @@ async function runScalpCycle() {
 
       const ticker = tickerMap[market];
       const snapshot = buildSnapshotFromOrderbook(obMap[market], ticker, market);
+      if (snapshot) state.lastSnapshots[market] = snapshot;
       const currentPrice = state.prices[market]?.tradePrice ?? ticker?.trade_price;
       if (currentPrice != null) pushPrice(market, currentPrice);
       const prevHigh = getPrevHigh(market);
@@ -891,6 +897,74 @@ async function runScalpCycle() {
   } catch (err) {
     tradeLogger.logTag('에러', 'SCALP cycle: ' + err.message);
     console.error('runScalpCycle error:', err.message);
+  }
+}
+
+/**
+ * fetchAssets/state.accounts 기준 보유 종목 중 SCALP_MARKETS에 대해 익절/손절/트레일링 등 전략 매도 감시.
+ * 봇이 매수하지 않은 외부 자산(업비트 잔고)도 평균매입가로 포지션을 구성해 동일 전략 적용.
+ * (독립 스캘프 봇이 해당 마켓을 보유 중이면 해당 마켓은 scalpRunner가 담당하므로 스킵)
+ */
+async function runExitPipeline() {
+  if (!state.botEnabled || !apiKeys.accessKey || !apiKeys.secretKey) return;
+  const accounts = state.accounts || [];
+  const snapshots = state.lastSnapshots || {};
+  const scalpState = state.scalpState || {};
+  const posByScalp = scalpRunner.getStatus?.()?.activePosition;
+  const scalpMarket = posByScalp?.market;
+
+  for (const market of SCALP_MARKETS) {
+    if (scalpMarket === market) continue;
+    const currency = market.replace(/^KRW-/, '');
+    const acc = accounts.find((a) => (a.currency || '').toUpperCase() === currency.toUpperCase());
+    if (!acc) continue;
+    const balance = parseFloat(acc.balance || 0);
+    if (balance <= 0) continue;
+    const snapshot = snapshots[market];
+    if (!snapshot) continue;
+    const currentPrice = state.prices[market]?.tradePrice ?? state.prices[market]?.trade_price;
+    if (currentPrice == null || currentPrice <= 0) continue;
+    const avgBuy = parseFloat(acc.avg_buy_price || 0);
+    const entryPrice = avgBuy > 0 ? avgBuy : currentPrice;
+    const position = {
+      entryPrice,
+      entryTimeMs: 0,
+      highSinceEntry: currentPrice,
+      strengthPeak60s: snapshot.strength_proxy_60s ?? snapshot.strength_peak_60s
+    };
+    const currentEntryScore = scalpState[market]?.entryScore ?? null;
+    const { exit, reason } = TradeExecutor.checkExit(position, snapshot, currentPrice, currentEntryScore);
+    if (!exit) continue;
+    const volume = Math.floor(balance * 1e8) / 1e8;
+    if (volume <= 0) continue;
+    try {
+      await withUpbitFailover(async () => {
+        const k = getActiveUpbitKeys();
+        return TradeExecutor.placeMarketSellByVolume(k.accessKey, k.secretKey, market, volume);
+      });
+      const label = TradeExecutor.getExitReasonLabel ? TradeExecutor.getExitReasonLabel(reason) : (reason || '청산');
+      tradeLogger.logTag('EXIT', `${market} ${label}`, { market, reason, volume });
+      recordTrade({
+        timestamp: new Date().toISOString(),
+        ticker: market,
+        side: 'sell',
+        price: currentPrice,
+        quantity: volume,
+        fee: 0,
+        revenue: (currentPrice - entryPrice) * volume,
+        net_return: ((currentPrice - entryPrice) / entryPrice) * 100,
+        reason: label,
+        strategy_id: state.currentStrategyId
+      });
+      state.assets = await fetchAssets();
+      if (state.accounts) {
+        const idx = state.accounts.findIndex((a) => (a.currency || '').toUpperCase() === currency.toUpperCase());
+        if (idx >= 0) state.accounts[idx] = { ...state.accounts[idx], balance: '0' };
+      }
+      emitDashboard().catch(() => {});
+    } catch (e) {
+      tradeLogger.logTag('에러', 'EXIT 매도 실패: ' + (e?.message || ''));
+    }
   }
 }
 
@@ -1093,6 +1167,7 @@ setInterval(async () => {
     state.trades = await db.getRecentTrades(10);
     computeKimp();
     await runScalpCycle();
+    await runExitPipeline();
 
     const mpiList = memeEngine.getAllMPI();
     const mpiBySymbol = {};
@@ -1133,8 +1208,9 @@ setInterval(async () => {
         // 독립 스캘프 봇 가동 중: 메인 오케스트레이터 진입 차단 (우선권 탈취)
       } else {
       const market = 'KRW-' + orchResult.signal.symbol;
-      const currentPrice = state.prices[market]?.tradePrice ?? state.prices[market]?.trade_price ?? null;
+      state.assets = await fetchAssets();
       const orderableKrw = state.assets?.orderableKrw ?? 0;
+      const currentPrice = state.prices[market]?.tradePrice ?? state.prices[market]?.trade_price ?? null;
       const totalEval = state.assets?.totalEvaluationKrw ?? 0;
       const totalCoinEval = Math.max(0, (totalEval || 0) - (orderableKrw || 0));
       const isRaceHorseTimeWindow = StrategyManager.isRaceHorseTimeWindow();
@@ -1150,16 +1226,19 @@ setInterval(async () => {
       const use50PercentOrder = state.raceHorseActive && isRaceHorseTimeWindow;
       const aggressiveMult = scalpEngine.getSymbolWeightMultiplier(symbol);
       const baseKrwForOrder = amountKrw <= 0 ? 0 : (use50PercentOrder ? amountKrw : amountKrw * aggressiveMult);
-      const quantityKrw = baseKrwForOrder <= 0
+      let quantityKrw = baseKrwForOrder <= 0
         ? 0
         : use50PercentOrder
           ? amountKrw
           : computeOrderQuantityWithMpi(market, baseKrwForOrder, currentPrice).quantityKrw;
+      if (orderableKrw > 0 && quantityKrw * 1.0005 > orderableKrw) {
+        quantityKrw = Math.min(quantityKrw, Math.floor(orderableKrw * 0.99));
+      }
       if (quantityKrw >= (configDefault.MIN_ORDER_KRW || 5000)) {
             try {
               const order = await withUpbitFailover(() => {
                 const k = getActiveUpbitKeys();
-                return TradeExecutor.placeMarketBuyByPrice(k.accessKey, k.secretKey, market, Math.round(quantityKrw));
+                return TradeExecutor.placeMarketBuyByPrice(k.accessKey, k.secretKey, market, Math.round(quantityKrw), orderableKrw);
               });
               const price = order && (order.price != null ? order.price : order.avg_price);
               const volume = order && (order.executed_volume != null ? order.executed_volume : order.volume);
@@ -1179,9 +1258,17 @@ setInterval(async () => {
               state.assets = await fetchAssets();
               emitDashboard().catch(() => {});
             } catch (err) {
+              const isInsufficient = err?.code === 'INSUFFICIENT_FUNDS_BID' || (err?.message && String(err.message).includes('INSUFFICIENT_FUNDS_BID'));
               tradeLogger.logTag('에러', 'Orchestrator ENTER 주문 실패: ' + (err?.message || ''));
-              if (discordBot.sendErrorAlert) discordBot.sendErrorAlert('오케스트레이터 매수 실패', err?.message).catch(() => {});
+              if (isInsufficient && discordBot.sendToChannel) {
+                discordBot.sendToChannel('⚠️ 잔액 부족으로 매수 건너뜀 (주문가능KRW 부족)').catch(() => {});
+              } else if (!isInsufficient && discordBot.sendErrorAlert) {
+                discordBot.sendErrorAlert('오케스트레이터 매수 실패', err?.message).catch(() => {});
+              }
             }
+          } else if (quantityKrw > 0 && quantityKrw < (configDefault.MIN_ORDER_KRW || 5000)) {
+            tradeLogger.logTag('거절', 'Orchestrator ENTER: 주문가능KRW 부족으로 매수 스킵 (최소주문금액 미달)', { market, quantityKrw, orderableKrw });
+            if (discordBot.sendToChannel) discordBot.sendToChannel('⚠️ 잔액 부족으로 매수 건너뜀 (최소 주문금액 미달)').catch(() => {});
           }
     }
     }
@@ -1194,7 +1281,8 @@ setInterval(async () => {
         apiKeys,
         TradeExecutor,
         recordTrade,
-        emitDashboard
+        emitDashboard,
+        sendAlert: (msg) => { if (discordBot.sendToChannel) discordBot.sendToChannel(msg).catch(() => {}); }
       });
     } catch (e) {
       console.warn('scalpRunner.tick:', e?.message);
@@ -1680,6 +1768,36 @@ const initPromise = (async () => {
       const remainingMs = scalpState.getRemainingMs();
       return { success: extended, remainingMs };
     },
+    /** [🛠️ 역할 C] git pull origin main 후 변경 시 2초 뒤 process.exit(0). PM2가 재시작. */
+    adminGitPullRestart: () => {
+      return new Promise((resolve) => {
+        const repoRoot = path.join(__dirname, '..');
+        exec('git pull origin main', { cwd: repoRoot }, (err, stdout, stderr) => {
+          const out = (stdout || '') + (stderr || '');
+          if (err) {
+            resolve({ content: '❌ git pull 오류: ' + (err.message || out || '알 수 없음') });
+            return;
+          }
+          if (/Already up to date/i.test(out)) {
+            resolve({ content: '✅ 현재 최신 상태입니다. 변경 사항이 없어 재기동하지 않습니다.' });
+            return;
+          }
+          setTimeout(() => {
+            console.log('[Admin] git pull 반영 후 재기동합니다. (PM2가 프로세스를 자동 재시작합니다.)');
+            process.exit(0);
+          }, 2000);
+          resolve({ content: '🚀 최신 소스 코드를 가져왔습니다. 시스템을 재기동합니다...' });
+        });
+      });
+    },
+    /** [🛠️ 역할 C] 1초 뒤 process.exit(0). PM2가 재시작. */
+    adminSimpleRestart: () => {
+      setTimeout(() => {
+        console.log('[Admin] 수동 재기동 요청. (PM2가 프로세스를 자동 재시작합니다.)');
+        process.exit(0);
+      }, 1000);
+      return Promise.resolve({ content: '♻️ 즉시 재기동을 시작합니다...' });
+    },
     currentState: async () => {
       state.assets = await fetchAssets();
       const assets = state.assets;
@@ -1928,10 +2046,10 @@ const initPromise = (async () => {
       for (const acc of accounts) {
         const currency = acc.currency;
         if (currency === 'KRW') continue;
+        if (['APENFT', 'PURSE'].includes(currency)) continue;
         const balance = parseFloat(acc.balance || 0);
         if (balance <= 0) continue;
         const market = 'KRW-' + currency;
-        if (!SCALP_MARKETS.includes(market)) continue;
         const volume = Math.floor(balance * 1e8) / 1e8;
         if (volume <= 0) continue;
         try {
@@ -2467,10 +2585,16 @@ const initPromise = (async () => {
           token: apiKeys.discordBotToken,
           channelId: apiKeys.discordChannelId,
           adminId: apiKeys.discordAdminId || null,
+          adminDiscordId: apiKeys.discordAdminDiscordId || apiKeys.discordAdminId || null,
           tradingLogChannelId: apiKeys.tradingLogChannelId || null,
           aiAnalysisChannelId: apiKeys.aiAnalysisChannelId || null,
           handlers: discordHandlers
         });
+        if (typeof upbit.setRateLimitAlertCallback === 'function') {
+          upbit.setRateLimitAlertCallback(() => {
+            if (discordBot.sendToChannel) discordBot.sendToChannel('⚠️ API 요청 제한으로 재시도 중').catch(() => {});
+          });
+        }
         console.log('[MyScalpBot] 로그인 요청 완료. 온라인 시 "[MyScalpBot] 온라인" 로그 확인.');
         startFourHourlyMarketReport(apiKeys.aiAnalysisChannelId);
         startHourlyHealthCheck();
