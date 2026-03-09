@@ -55,6 +55,7 @@ const { MessageEmbed } = require('discord.js');
 const orchestrator = require('./lib/strategy/orchestrator');
 const scalpRunner = require('./lib/scalp_independent/scalpRunner');
 const scalpState = require('./lib/scalp_independent/scalpState');
+const tradeHistoryLogger = require('./lib/tradeHistoryLogger');
 const geminiResolvedPath = require.resolve('./lib/gemini');
 const geminiModule = require('./lib/gemini');
 console.log('[Gemini] server.js가 로드한 gemini 모듈 절대경로:', geminiResolvedPath);
@@ -69,6 +70,7 @@ const FX_API_URL = 'https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@lates
 const BINANCE_TICKER_URL = 'https://api.binance.com/api/v3/ticker/price';
 const COINGECKO_GLOBAL_URL = 'https://api.coingecko.com/api/v3/global';
 const ANALYST_EMBED_COLOR = 0x0099ff;
+/** 전 종목(BTC, ETH, XRP, SOL) 동일 로직 적용. 루프에서 RSI·볼린저·진입점을 종목별 독립 계산. 부팅 시 fetchAssets 선행으로 재기동 후에도 보유 종목 매도 감시 가능 */
 const SCALP_MARKETS = ['KRW-BTC', 'KRW-ETH', 'KRW-XRP', 'KRW-SOL'];
 const BINANCE_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'XRPUSDT', 'SOLUSDT'];
 const ASSET_POLL_MS = 1000;
@@ -77,38 +79,82 @@ const LOG_EMIT_MS = 800;
 const PREV_HIGH_WINDOW = 60;
 
 function loadApiKeys() {
+  const fromEnv = (key, def = '') => (process.env[key] || '').trim() || def;
+  const base = {
+    discordBotToken: process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || '',
+    discordChannelId: process.env.CHANNEL_ID || process.env.DISCORD_CHANNEL_ID || '',
+    discordAdminId: '',
+    tradingLogChannelId: process.env.TRADING_LOG_CHANNEL_ID || '',
+    aiAnalysisChannelId: process.env.AI_ANALYSIS_CHANNEL_ID || ''
+  };
   try {
     if (fs.existsSync(CONFIG_PATH)) {
       const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
       const config = JSON.parse(raw);
-      return {
-        accessKey: config.access_key || process.env.UPBIT_ACCESS_KEY || '',
-        secretKey: config.secret_key || process.env.UPBIT_SECRET_KEY || '',
-        discordBotToken: process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || config.discord_token || config.discord_bot_token || '',
-        discordChannelId: process.env.CHANNEL_ID || process.env.DISCORD_CHANNEL_ID || config.channel_id || config.discord_channel_id || '',
-        discordAdminId: normalizeAdminId(process.env.ADMIN_ID || process.env.DISCORD_ADMIN_ID || config.admin_id || config.discord_admin_id || ''),
-        tradingLogChannelId: process.env.TRADING_LOG_CHANNEL_ID || config.trading_log_channel_id || '',
-        aiAnalysisChannelId: process.env.AI_ANALYSIS_CHANNEL_ID || config.ai_analysis_channel_id || ''
-      };
+      base.accessKey = config.access_key || fromEnv('UPBIT_ACCESS_KEY', '');
+      base.secretKey = config.secret_key || fromEnv('UPBIT_SECRET_KEY', '');
+      base.discordBotToken = base.discordBotToken || config.discord_token || config.discord_bot_token || '';
+      base.discordChannelId = base.discordChannelId || config.channel_id || config.discord_channel_id || '';
+      base.discordAdminId = normalizeAdminId(process.env.ADMIN_ID || process.env.DISCORD_ADMIN_ID || config.admin_id || config.discord_admin_id || '');
+      base.accessKeyMini = fromEnv('UPBIT_ACCESS_KEY_MINI', '');
+      base.secretKeyMini = fromEnv('UPBIT_SECRET_KEY_MINI', '');
+      return base;
     }
   } catch (err) {
     console.warn('config.json load failed:', err.message);
   }
-  return {
-    accessKey: process.env.UPBIT_ACCESS_KEY || '',
-    secretKey: process.env.UPBIT_SECRET_KEY || '',
-    discordBotToken: process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || '',
-    discordChannelId: process.env.CHANNEL_ID || process.env.DISCORD_CHANNEL_ID || '',
-    discordAdminId: normalizeAdminId(process.env.ADMIN_ID || process.env.DISCORD_ADMIN_ID || ''),
-    tradingLogChannelId: process.env.TRADING_LOG_CHANNEL_ID || '',
-    aiAnalysisChannelId: process.env.AI_ANALYSIS_CHANNEL_ID || ''
-  };
+  base.accessKey = fromEnv('UPBIT_ACCESS_KEY', '');
+  base.secretKey = fromEnv('UPBIT_SECRET_KEY', '');
+  base.discordAdminId = normalizeAdminId(process.env.ADMIN_ID || process.env.DISCORD_ADMIN_ID || '');
+  base.accessKeyMini = fromEnv('UPBIT_ACCESS_KEY_MINI', '');
+  base.secretKeyMini = fromEnv('UPBIT_SECRET_KEY_MINI', '');
+  return base;
 }
 
 const adminGuard = require('./lib/adminGuard');
 const normalizeAdminId = adminGuard.normalizeAdminId;
 
-const apiKeys = loadApiKeys();
+const apiKeysRaw = loadApiKeys();
+let activeKeySet = 'default';
+
+function getActiveUpbitKeys() {
+  if (activeKeySet === 'mini' && apiKeysRaw.accessKeyMini && apiKeysRaw.secretKeyMini) {
+    return { accessKey: apiKeysRaw.accessKeyMini, secretKey: apiKeysRaw.secretKeyMini };
+  }
+  return { accessKey: apiKeysRaw.accessKey, secretKey: apiKeysRaw.secretKey };
+}
+
+function hasMiniKeySet() {
+  return !!(apiKeysRaw.accessKeyMini && apiKeysRaw.secretKeyMini);
+}
+
+function isUpbitAuthError(err) {
+  const msg = (err && err.message) || '';
+  return /401|unauthorized|invalid_query|ip\s*mismatch|ip\s*불일치|등록된\s*ip/i.test(msg);
+}
+
+async function withUpbitFailover(fn) {
+  try {
+    return await fn();
+  } catch (e) {
+    if (isUpbitAuthError(e) && activeKeySet === 'default' && hasMiniKeySet()) {
+      activeKeySet = 'mini';
+      if (discordBot && typeof discordBot.sendToChannel === 'function') {
+        discordBot.sendToChannel('⚠️ 기본 API 키 IP 인증 실패 - 미니 PC용 대체 키로 자동 전환되었습니다.').catch(() => {});
+      }
+      return await fn();
+    }
+    throw e;
+  }
+}
+
+const apiKeys = new Proxy(apiKeysRaw, {
+  get(target, prop) {
+    if (prop === 'accessKey') return getActiveUpbitKeys().accessKey;
+    if (prop === 'secretKey') return getActiveUpbitKeys().secretKey;
+    return target[prop];
+  }
+});
 console.log('[Check] ADMIN_ID loaded:', process.env.ADMIN_ID ? 'Yes' : 'No');
 const app = express();
 const server = http.createServer(app);
@@ -200,10 +246,13 @@ app.get('/api/accounts', async (req, res) => {
     if (!apiKeys.accessKey || !apiKeys.secretKey) {
       return res.json({ list: [], assets: null });
     }
-    const [accounts, tickers] = await Promise.all([
-      upbit.getAccounts(apiKeys.accessKey, apiKeys.secretKey),
-      upbit.getTickers(SCALP_MARKETS)
-    ]);
+    const [accounts, tickers] = await withUpbitFailover(async () => {
+      const k = getActiveUpbitKeys();
+      return Promise.all([
+        upbit.getAccounts(k.accessKey, k.secretKey),
+        upbit.getTickers(SCALP_MARKETS)
+      ]);
+    });
     const tickerMap = {};
     (tickers || []).forEach((t) => { tickerMap[t.market] = t; });
     const list = (accounts || [])
@@ -411,7 +460,10 @@ app.get('/api/check-upbit', async (req, res) => {
     return res.json({ ok: false, message: 'API 키가 설정되지 않았습니다.', sysdate: sysdateStr });
   }
   try {
-    const accounts = await upbit.getAccounts(apiKeys.accessKey, apiKeys.secretKey);
+    const accounts = await withUpbitFailover(async () => {
+      const k = getActiveUpbitKeys();
+      return upbit.getAccounts(k.accessKey, k.secretKey);
+    });
     if (!Array.isArray(accounts)) {
       return res.json({ ok: false, message: '잔고 조회 응답 형식 오류', sysdate: sysdateStr });
     }
@@ -460,13 +512,16 @@ function getPrevHigh(market) {
 }
 
 async function fetchAssets() {
-  if (!apiKeys.accessKey || !apiKeys.secretKey) return null;
+  const keys = getActiveUpbitKeys();
+  if (!keys.accessKey || !keys.secretKey) return null;
   try {
-    const [accounts, tickers] = await Promise.all([
-      upbit.getAccounts(apiKeys.accessKey, apiKeys.secretKey),
-      upbit.getTickers(SCALP_MARKETS)
-    ]);
-    return upbit.summarizeAccounts(accounts, tickers);
+    return await withUpbitFailover(async () => {
+      const [accounts, tickers] = await Promise.all([
+        upbit.getAccounts(getActiveUpbitKeys().accessKey, getActiveUpbitKeys().secretKey),
+        upbit.getTickers(SCALP_MARKETS)
+      ]);
+      return upbit.summarizeAccounts(accounts, tickers);
+    });
   } catch (err) {
     console.error('fetchAssets error:', err.message);
     return null;
@@ -474,17 +529,16 @@ async function fetchAssets() {
 }
 
 /**
- * 수익률(%) 단일 공식: ((평가금액합계+원화) / (총매수금액+원화) - 1) * 100. 분모 0이면 0.00% (발산 방지).
- * APENFT·PURSE 제외된 assets(summarizeAccounts 결과) 기준.
+ * 수익률(%) 업비트 기준: (평가손익 / 총매수) * 100. 총매수 0이면 0% (에러 방지).
+ * APENFT·PURSE·잡코인 제외된 assets(summarizeAccounts 결과) 기준.
  */
 function getProfitPct(assets) {
   if (!assets) return 0;
   const totalEval = assets.totalEvaluationKrw ?? 0;
   const totalBuy = assets.totalBuyKrwForCoins ?? assets.totalBuyKrw ?? 0;
-  const krw = assets.orderableKrw ?? 0;
-  const denominator = totalBuy + krw;
-  if (denominator <= 0) return 0;
-  return (totalEval / denominator - 1) * 100;
+  if (totalBuy <= 0) return 0;
+  const profitLoss = totalEval - totalBuy;
+  return (profitLoss / totalBuy) * 100;
 }
 
 /** AI 추천 대형주 승인 대상 티커 (대괄호 추출 후 이 목록에 있을 때만 승인 버튼 노출) */
@@ -524,10 +578,13 @@ function buildCurrentStateEmbed(assets, summary, opts) {
       ? opts.raceHorseStatusLabel
       : (opts?.isRaceHorseMode === true ? '🔥 활성' : '❄️ 비활성');
   const w = (summary && summary.weights) || {};
-  const totalEval = assets?.totalEvaluationKrw ?? 0;
-  const orderableKrw = assets?.orderableKrw ?? 0;
+  const totalBuyKrw = Math.floor(assets?.totalBuyKrwForCoins ?? assets?.totalBuyKrw ?? 0);
+  const totalEvalKrw = Math.floor(assets?.totalEvaluationKrw ?? 0);
+  const orderableKrw = Math.floor(assets?.orderableKrw ?? 0);
+  const profitLossKrw = totalEvalKrw - totalBuyKrw;
   const profitPctNum = getProfitPct(assets);
-  const profitPct = (profitPctNum >= 0 ? '🟢 ' : '🔴 ') + (profitPctNum >= 0 ? '+' : '') + profitPctNum.toFixed(2) + '%';
+  const profitRateStr = (totalBuyKrw <= 0 ? 0 : Math.floor(profitPctNum * 100) / 100).toFixed(2) + '%';
+  const profitPct = (profitPctNum >= 0 ? '🟢 ' : '🔴 ') + (profitPctNum >= 0 ? '+' : '') + profitRateStr;
   const strategyName = summary?.strategyName || 'SCALP 기본';
   const weightTable = [
     '| 항목 | 값 |',
@@ -540,11 +597,18 @@ function buildCurrentStateEmbed(assets, summary, opts) {
     `| Depth | ${w.weight_depth ?? '—'} |`,
     `| Kimp | ${w.weight_kimp ?? '—'} |`
   ].join('\n');
+  const investmentSummary = [
+    '**💰 투자 내역 요약**',
+    `• **총매수**: ${totalBuyKrw.toLocaleString('ko-KR')} 원`,
+    `• **총평가**: ${totalEvalKrw.toLocaleString('ko-KR')} 원`,
+    `• **평가손익**: ${profitLossKrw.toLocaleString('ko-KR')} 원`,
+    `• **수익률**: ${profitPct}`,
+    `• **주문가능**: ${orderableKrw.toLocaleString('ko-KR')} 원`
+  ].join('\n');
   const fields = [
     { name: '매매 엔진 상태', value: isEngineRunning ? '🟢 구동 중' : '🔴 정지됨', inline: true },
     { name: '경주마 모드', value: raceHorseLabel, inline: true },
-    { name: '총 평가금액(현재 총자산)', value: totalEval.toLocaleString('ko-KR') + ' 원', inline: true },
-    { name: 'KRW 잔고', value: orderableKrw.toLocaleString('ko-KR') + ' 원', inline: true },
+    { name: '투자 내역', value: investmentSummary, inline: false },
     { name: '총 손익률', value: profitPct, inline: true },
     { name: '가동 전략', value: strategyName, inline: false },
     { name: 'RaceHorse(예약) 가중치', value: '```\n' + weightTable + '\n```', inline: false }
@@ -572,7 +636,7 @@ function buildCurrentStateEmbed(assets, summary, opts) {
     .setTitle('📊 현재 상태')
     .setColor(0x5865f2)
     .addFields(...fields)
-    .setFooter({ text: 'APENFT·PURSE 제외 · 수익률 = ((평가합계+원화)/(총매수+원화)-1)×100, 분모 0이면 0%' })
+    .setFooter({ text: 'APENFT·PURSE·잡코인 제외 · 수익률 = (평가손익/총매수)×100, 총매수 0이면 0%' })
     .setTimestamp();
 }
 
@@ -738,6 +802,7 @@ async function runScalpCycle() {
     const nextScalpState = {};
 
     for (const market of SCALP_MARKETS) {
+      // 종목별 독립: RSI·볼린저·strength·OBI·entry pipeline 계산
       const sym = market.replace(/^KRW-/, '');
       const mpiScore = mpiBySymbol[sym] != null ? mpiBySymbol[sym] : null;
       const mpiMultiplier = scalpEngine.getMpiPositionMultiplier(mpiScore);
@@ -891,29 +956,35 @@ function recordTrade(row) {
     const pct = row.net_return != null ? row.net_return * 100 : undefined;
     discordBot.sendTradeAlert({ ticker: row.ticker, side: row.side, price: row.price, quantity: row.quantity, currentReturnPct: pct }).catch(() => {});
   }
-  // 디스코드 전용 채널에는 실제 매수/매도 체결 알림만 전송 (REJECT·BUY_SIGNAL·일반 에러는 제외)
+  try {
+    tradeHistoryLogger.appendTradeHistory(row, { rsi: row.rsi, trend_score: row.trend_score });
+  } catch (_) {}
 }
 
 async function fetchTrades() {
   if (!apiKeys.accessKey || !apiKeys.secretKey) return [];
-  const all = [];
   try {
-    for (const market of SCALP_MARKETS) {
-      const orders = await upbit.getRecentOrders(apiKeys.accessKey, apiKeys.secretKey, market, 5);
-      all.push(...(orders || []).map(o => ({
-        uuid: o.uuid,
-        market: o.market,
-        side: o.side,
-        ord_type: o.ord_type,
-        price: o.price || o.avg_price,
-        volume: o.volume || o.executed_volume,
-        state: o.state,
-        created_at: o.created_at,
-        executed_at: o.executed_at
-      })));
-    }
-    all.sort((a, b) => new Date(b.executed_at || b.created_at || 0) - new Date(a.executed_at || a.created_at || 0));
-    return all.slice(0, 10);
+    const all = await withUpbitFailover(async () => {
+      const k = getActiveUpbitKeys();
+      const out = [];
+      for (const market of SCALP_MARKETS) {
+        const orders = await upbit.getRecentOrders(k.accessKey, k.secretKey, market, 5);
+        out.push(...(orders || []).map((o) => ({
+          uuid: o.uuid,
+          market: o.market,
+          side: o.side,
+          ord_type: o.ord_type,
+          price: o.price || o.avg_price,
+          volume: o.volume || o.executed_volume,
+          state: o.state,
+          created_at: o.created_at,
+          executed_at: o.executed_at
+        })));
+      }
+      out.sort((a, b) => new Date(b.executed_at || b.created_at || 0) - new Date(a.executed_at || a.created_at || 0));
+      return out.slice(0, 10);
+    });
+    return all;
   } catch (err) {
     console.error('fetchTrades error:', err.message);
     return state.trades;
@@ -1008,7 +1079,10 @@ setInterval(async () => {
     state.assets = await fetchAssets();
     if (state.botEnabled && apiKeys.accessKey && apiKeys.secretKey) {
       try {
-        state.accounts = await upbit.getAccounts(apiKeys.accessKey, apiKeys.secretKey) || [];
+        state.accounts = await withUpbitFailover(async () => {
+          const k = getActiveUpbitKeys();
+          return upbit.getAccounts(k.accessKey, k.secretKey) || [];
+        });
       } catch (_) {
         state.accounts = state.accounts || [];
       }
@@ -1083,7 +1157,10 @@ setInterval(async () => {
           : computeOrderQuantityWithMpi(market, baseKrwForOrder, currentPrice).quantityKrw;
       if (quantityKrw >= (configDefault.MIN_ORDER_KRW || 5000)) {
             try {
-              const order = await TradeExecutor.placeMarketBuyByPrice(apiKeys.accessKey, apiKeys.secretKey, market, Math.round(quantityKrw));
+              const order = await withUpbitFailover(() => {
+                const k = getActiveUpbitKeys();
+                return TradeExecutor.placeMarketBuyByPrice(k.accessKey, k.secretKey, market, Math.round(quantityKrw));
+              });
               const price = order && (order.price != null ? order.price : order.avg_price);
               const volume = order && (order.executed_volume != null ? order.executed_volume : order.volume);
               recordTrade({
@@ -1339,15 +1416,14 @@ io.on('connection', (socket) => {
       if (typeof cb === 'function') cb({ success: false, message: 'API Key가 설정되지 않았습니다.' });
       return;
     }
-    const validation = await TradeExecutor.validateApiKeys(apiKeys.accessKey, apiKeys.secretKey);
-    if (!validation.valid) {
-      emitManualLog('error', validation.error || TradeExecutor.API_KEY_ERROR_MSG);
-      if (typeof cb === 'function') cb({ success: false, message: validation.error });
-      return;
-    }
     emitManualLog('info', `${market} ${amountKrw.toLocaleString('ko-KR')}원 시장가 매수 요청 중…`);
     try {
-      const order = await TradeExecutor.placeMarketBuyByPrice(apiKeys.accessKey, apiKeys.secretKey, market, amountKrw);
+      const order = await withUpbitFailover(async () => {
+        const k = getActiveUpbitKeys();
+        const validation = await TradeExecutor.validateApiKeys(k.accessKey, k.secretKey);
+        if (!validation.valid) throw new Error(validation.error || TradeExecutor.API_KEY_ERROR_MSG);
+        return TradeExecutor.placeMarketBuyByPrice(k.accessKey, k.secretKey, market, amountKrw);
+      });
       const price = order && (order.price != null ? order.price : order.avg_price);
       const volume = order && (order.executed_volume != null ? order.executed_volume : order.volume);
       recordTrade({
@@ -1383,16 +1459,13 @@ io.on('connection', (socket) => {
       if (typeof cb === 'function') cb({ success: false, message: 'API Key가 설정되지 않았습니다.' });
       return;
     }
-    const validation = await TradeExecutor.validateApiKeys(apiKeys.accessKey, apiKeys.secretKey);
-    if (!validation.valid) {
-      emitManualLog('error', validation.error || TradeExecutor.API_KEY_ERROR_MSG);
-      if (typeof cb === 'function') cb({ success: false, message: validation.error });
-      return;
-    }
     const currency = market.replace('KRW-', '');
     let volume = 0;
     try {
-      const accounts = await upbit.getAccounts(apiKeys.accessKey, apiKeys.secretKey);
+      const accounts = await withUpbitFailover(async () => {
+        const k = getActiveUpbitKeys();
+        return upbit.getAccounts(k.accessKey, k.secretKey);
+      });
       const acc = (accounts || []).find((a) => (a.currency || '').toUpperCase() === currency.toUpperCase());
       volume = acc ? parseFloat(acc.balance || 0) : 0;
     } catch (e) {
@@ -1407,7 +1480,10 @@ io.on('connection', (socket) => {
     }
     emitManualLog('info', `${market} 전량(${volume}) 시장가 매도 요청 중…`);
     try {
-      const order = await TradeExecutor.placeMarketSellByVolume(apiKeys.accessKey, apiKeys.secretKey, market, volume);
+      const order = await withUpbitFailover(async () => {
+        const k = getActiveUpbitKeys();
+        return TradeExecutor.placeMarketSellByVolume(k.accessKey, k.secretKey, market, volume);
+      });
       recordTrade({
         timestamp: new Date().toISOString(),
         ticker: market,
@@ -1526,8 +1602,11 @@ const initPromise = (async () => {
         return { success: false, message: 'API 키가 설정되지 않았습니다.' };
       }
       try {
-        const client = upbit.createClient(apiKeys.accessKey, apiKeys.secretKey);
-        await client.request('GET', '/orders', { market: 'KRW-BTC', state: 'done', limit: '1' });
+        await withUpbitFailover(async () => {
+          const k = getActiveUpbitKeys();
+          const client = upbit.createClient(k.accessKey, k.secretKey);
+          await client.request('GET', '/orders', { market: 'KRW-BTC', state: 'done', limit: '1' });
+        });
         state.botEnabled = true;
         state.assets = await fetchAssets();
         if (state.assets && state.assets.totalEvaluationKrw != null) {
@@ -1551,7 +1630,10 @@ const initPromise = (async () => {
       state.botEnabled = false;
       if (apiKeys.accessKey && apiKeys.secretKey) {
         try {
-          await upbit.cancelAllOrders(apiKeys.accessKey, apiKeys.secretKey, SCALP_MARKETS);
+          await withUpbitFailover(async () => {
+            const k = getActiveUpbitKeys();
+            return upbit.cancelAllOrders(k.accessKey, k.secretKey, SCALP_MARKETS);
+          });
         } catch (e) {
           console.warn('cancelAllOrders:', e?.message);
         }
@@ -1591,11 +1673,12 @@ const initPromise = (async () => {
       emitDashboard().catch(() => {});
       return { success: true };
     },
-    /** 독립 스캘프 3시간 연장 (1시간 미만일 때만 유효) */
+    /** 독립 스캘프 3시간 연장: 남은 시간(ms)이 60분 미만일 때만 expiryTime에 3*60*60*1000 추가 */
     extendIndependentScalp: () => {
       const extended = scalpState.extend();
       emitDashboard().catch(() => {});
-      return { success: extended, remainingMs: scalpState.getRemainingMs() };
+      const remainingMs = scalpState.getRemainingMs();
+      return { success: extended, remainingMs };
     },
     currentState: async () => {
       state.assets = await fetchAssets();
@@ -1629,27 +1712,30 @@ const initPromise = (async () => {
     currentReturn: async () => {
       state.assets = await fetchAssets();
       const assets = state.assets;
-      const totalKrw = assets?.orderableKrw ?? 0;
-      const totalEval = assets?.totalEvaluationKrw ?? 0;
-      const totalBuyKrw = assets?.totalBuyKrwForCoins ?? assets?.totalBuyKrw ?? 0;
+      const totalBuyKrw = Math.floor(assets?.totalBuyKrwForCoins ?? assets?.totalBuyKrw ?? 0);
+      const totalEval = Math.floor(assets?.totalEvaluationKrw ?? 0);
+      const totalKrw = Math.floor(assets?.orderableKrw ?? 0);
+      const profitLossKrw = totalEval - totalBuyKrw;
       const profitPctNum = getProfitPct(assets);
-      const pctStr = profitPctNum.toFixed(2) + '%';
-      const profitKrw = totalEval - (totalBuyKrw + totalKrw);
-      const isProfit = profitKrw >= 0;
+      const pctStr = (totalBuyKrw <= 0 ? 0 : Math.floor(profitPctNum * 100) / 100).toFixed(2) + '%';
+      const isProfit = profitLossKrw >= 0;
       const arrow = isProfit ? '▲' : '▼';
       const emoji = isProfit ? '🟢' : '🔴';
       const profitLine =
-        totalBuyKrw + totalKrw > 0
-          ? `${emoji} **현재 손익**: ${isProfit ? '+' : ''}${profitKrw.toLocaleString('ko-KR')}원 (${arrow} ${pctStr})`
+        totalBuyKrw > 0
+          ? `${emoji} **현재 손익**: ${isProfit ? '+' : ''}${profitLossKrw.toLocaleString('ko-KR')}원 (${arrow} ${pctStr})`
           : '🟢 **현재 손익**: 0원 (수익률 0.00%)';
       const summaryLine =
-        totalBuyKrw + totalKrw > 0
+        totalBuyKrw > 0
           ? `총 매수: ${totalBuyKrw.toLocaleString('ko-KR')}원 / 현재 총자산: ${totalEval.toLocaleString('ko-KR')}원`
           : '—';
       let holdingList = '없음';
       if (apiKeys.accessKey && apiKeys.secretKey) {
         try {
-          const accounts = await upbit.getAccounts(apiKeys.accessKey, apiKeys.secretKey) || [];
+          const accounts = await withUpbitFailover(async () => {
+            const k = getActiveUpbitKeys();
+            return upbit.getAccounts(k.accessKey, k.secretKey) || [];
+          });
           const coins = (accounts || []).filter(
             (a) => a.currency !== 'KRW' && !['APENFT', 'PURSE'].includes(a.currency) && parseFloat(a.balance || 0) > 0
           );
@@ -1661,13 +1747,13 @@ const initPromise = (async () => {
         .setTitle(isProfit ? '🟢 현재 수익률' : '🔴 현재 수익률')
         .setColor(embedColor)
         .addFields(
-          { name: '보유 KRW', value: totalKrw.toLocaleString('ko-KR') + ' 원', inline: true },
-          { name: '현재 총자산', value: totalEval.toLocaleString('ko-KR') + ' 원', inline: true },
-          { name: '총 매수금액', value: totalBuyKrw.toLocaleString('ko-KR') + ' 원', inline: true },
+          { name: '주문가능(KRW)', value: totalKrw.toLocaleString('ko-KR') + ' 원', inline: true },
+          { name: '총평가', value: totalEval.toLocaleString('ko-KR') + ' 원', inline: true },
+          { name: '총매수', value: totalBuyKrw.toLocaleString('ko-KR') + ' 원', inline: true },
           { name: '평가 손익', value: profitLine + '\n' + summaryLine, inline: false },
           { name: '가동중인 종목', value: holdingList, inline: false }
         )
-        .setFooter({ text: 'APENFT·PURSE 제외 · 수익률 = ((평가합계+원화)/(총매수+원화)-1)×100' })
+        .setFooter({ text: 'APENFT·PURSE·잡코인 제외 · 수익률 = (평가손익/총매수)×100, 총매수 0이면 0%' })
         .setTimestamp();
       return embed;
     },
@@ -1828,7 +1914,15 @@ const initPromise = (async () => {
     },
     sellAll: async () => {
       if (!apiKeys.accessKey || !apiKeys.secretKey) return 'API 키 미설정';
-      const accounts = await upbit.getAccounts(apiKeys.accessKey, apiKeys.secretKey);
+      let accounts;
+      try {
+        accounts = await withUpbitFailover(async () => {
+          const k = getActiveUpbitKeys();
+          return upbit.getAccounts(k.accessKey, k.secretKey);
+        });
+      } catch (e) {
+        return '계좌 조회 실패: ' + (e?.message || '');
+      }
       if (!Array.isArray(accounts)) return '계좌 조회 실패';
       const sold = [];
       for (const acc of accounts) {
@@ -1841,7 +1935,10 @@ const initPromise = (async () => {
         const volume = Math.floor(balance * 1e8) / 1e8;
         if (volume <= 0) continue;
         try {
-          await TradeExecutor.placeMarketSellByVolume(apiKeys.accessKey, apiKeys.secretKey, market, volume);
+          await withUpbitFailover(async () => {
+            const k = getActiveUpbitKeys();
+            return TradeExecutor.placeMarketSellByVolume(k.accessKey, k.secretKey, market, volume);
+          });
           sold.push(`${currency} ${volume}`);
         } catch (e) {
           console.warn('sellAll', market, e?.message);
@@ -2206,6 +2303,22 @@ const initPromise = (async () => {
         return { content: analysis || '분석 결과를 생성하지 못했습니다.' };
       } catch (e) {
         return { content: '로그 분석 오류: ' + (e?.message || '알 수 없음') };
+      }
+    },
+    /** 조언자의 한마디: 최근 3건 거래 → Gemini 분석 → 교훈 한 줄 strategy_memory.txt에 저장 */
+    advisorOneLiner: async () => {
+      try {
+        const trades = tradeHistoryLogger.getLastTradesForAdvisor(3);
+        const memoryText = tradeHistoryLogger.getStrategyMemory();
+        const tradesText = trades.length
+          ? trades.map((t) => JSON.stringify({ ticker: t.ticker, side: t.side, timestamp: t.timestamp, price: t.price, quantity: t.quantity, net_return: t.net_return, reason: t.reason, rsi: t.rsi, trend_score: t.trend_score })).join('\n')
+          : '최근 거래 이력이 없습니다. 매수/매도가 발생하면 여기에 기록됩니다.';
+        const gemini = require('./lib/gemini');
+        const { analysis, lesson } = await gemini.askGeminiForAdvisorAdvice(tradesText, memoryText || undefined);
+        if (lesson) tradeHistoryLogger.appendStrategyMemory(lesson);
+        return { content: analysis };
+      } catch (e) {
+        return { content: '조언자 분석 오류: ' + (e?.message || '알 수 없음') };
       }
     }
   };

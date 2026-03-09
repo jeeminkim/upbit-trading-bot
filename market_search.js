@@ -57,10 +57,37 @@ client.on('error', (err) => console.error('[Analyst Error]', err));
 client.on('debug', (info) => console.log('[Analyst Debug]', info));
 
 const DASHBOARD_URL = process.env.DASHBOARD_URL || 'http://localhost:3000';
+const GOOGLE_TRENDS_URL = process.env.GOOGLE_TRENDS_URL || '';
+
+/** 구글 트렌드 등 외부 API: Content-Type이 application/json이 아니면 parse 시도 없이 null 반환 (HTML/429 방어) */
+async function fetchGoogleTrends() {
+  if (!GOOGLE_TRENDS_URL) return null;
+  try {
+    const response = await axios.get(GOOGLE_TRENDS_URL, { timeout: 15000, validateStatus: () => true });
+    const ct = (response.headers && response.headers['content-type']) || '';
+    if (!ct.includes('application/json')) {
+      console.error('[GoogleTrends_Error] Invalid Content-Type: Received HTML or non-JSON');
+      return null;
+    }
+    if (response.status !== 200) {
+      console.error('[GoogleTrends_Error] status=' + response.status);
+      return null;
+    }
+    return response.data;
+  } catch (error) {
+    console.error('[GoogleTrends_Error]', error?.message);
+    return null;
+  }
+}
 
 async function fetchAnalystEmbed(action) {
   const url = `${DASHBOARD_URL}/api/analyst/${action}`;
   const res = await axios.get(url, { timeout: 15000 });
+  const ct = (res.headers && res.headers['content-type']) || '';
+  if (!ct.includes('application/json')) {
+    console.error('[Analyst] Invalid Content-Type (HTML 등): ' + ct);
+    return null;
+  }
   return res.data;
 }
 
@@ -173,7 +200,17 @@ client.on(InteractionCreateEvent, async (interaction) => {
   try {
     const adminQ = (action === 'diagnose_no_trade' || action === 'suggest_logic') && effectiveAdminId ? '?admin_id=' + encodeURIComponent(effectiveAdminId) : '';
     const url = `${DASHBOARD_URL}/api/analyst/${action}${adminQ}`;
-    const res = await axios.get(url, { timeout: 30000 });
+    const res = await axios.get(url, { timeout: 30000, validateStatus: () => true });
+    const ct = (res.headers && res.headers['content-type']) || '';
+    if (!ct.includes('application/json')) {
+      console.error('[Analyst] Invalid Content-Type (HTML 등): ' + ct);
+      await interaction.editReply({ content: '데이터 일시적 불가 (서버 응답이 JSON이 아님). 잠시 후 다시 시도하세요.' }).catch(() => {});
+      return;
+    }
+    if (res.status !== 200) {
+      await interaction.editReply({ content: `서버 오류: ${res.status}` }).catch(() => {});
+      return;
+    }
     const data = res.data;
     const embed = (data && typeof data === 'object') ? new MessageEmbed(data) : new MessageEmbed().setDescription(String(data || '데이터 없음'));
     await interaction.editReply({ embeds: [embed], content: null }).catch(() => {});
