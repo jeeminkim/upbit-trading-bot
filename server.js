@@ -1182,6 +1182,7 @@ async function emitDashboard() {
   state.lastEmit = {
     assets: state.assets,
     profitSummary: { totalEval, totalBuyKrw, profitKrw, profitPct },
+    modeRemaining: getModeRemainingOpts(),
     prices: state.prices,
     fng: state.fng,
     botEnabled: state.botEnabled,
@@ -1455,13 +1456,14 @@ setInterval(() => {
       state.lastEmit.wsLagMs = state.wsLagMs;
       state.lastEmit.assets = state.assets;
       const a = state.assets;
-      const te = a?.totalEvaluationKrw ?? 0;
-      const tb = a?.totalBuyKrw ?? a?.totalBuyKrwForCoins ?? 0;
+      const te = Math.floor(Number(a?.totalEvaluationKrw ?? 0));
+      const tb = Math.floor(Number(a?.totalBuyKrwForCoins ?? a?.totalBuyKrw ?? 0));
+      const profitPctNum = getProfitPct(a);
       state.lastEmit.profitSummary = {
         totalEval: te,
         totalBuyKrw: tb,
         profitKrw: te - tb,
-        profitPct: tb > 0 ? ((te / tb - 1) * 100) : null
+        profitPct: tb > 0 ? profitPctNum : 0
       };
       state.lastEmit.prices = state.prices;
       state.lastEmit.fng = state.fng;
@@ -1477,6 +1479,8 @@ setInterval(() => {
         state.strategySummary.strategyName = state.raceHorseActive ? 'RaceHorse' : (state.strategySummary.aggressive_mode ? 'Aggressive' : (state.strategySummary.race_horse_scheduler_enabled ? 'RaceHorse(예약)' : 'SCALP 기본'));
       }
       state.lastEmit.strategySummary = state.strategySummary;
+      state.lastEmit.modeRemaining = getModeRemainingOpts();
+      state.lastEmit.independentScalpStatus = scalpRunner.getStatus();
       io.emit('dashboard', state.lastEmit);
     }
   })();

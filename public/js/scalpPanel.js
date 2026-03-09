@@ -18,7 +18,7 @@
   }
 
   window.updateIndependentScalpPanel = function (status) {
-    if (!status) return;
+    if (!status || typeof status !== 'object') return;
     var statusEl = document.getElementById('scalp-status');
     var timerEl = document.getElementById('scalp-timer');
     var entriesEl = document.getElementById('scalp-entries');
@@ -27,14 +27,15 @@
     var riskHaltEl = document.getElementById('scalp-risk-halt');
 
     if (statusEl) statusEl.textContent = status.isRunning ? (status.isRiskHalt ? 'RISK_HALT' : 'RUNNING') : 'STOPPED';
-    if (timerEl) timerEl.textContent = formatRemainingMs(status.remainingMs);
-    if (entriesEl) entriesEl.textContent = status.dailyEntries != null ? status.dailyEntries : '0';
+    if (timerEl) timerEl.textContent = formatRemainingMs(Number(status.remainingMs));
+    if (entriesEl) entriesEl.textContent = status.dailyEntries != null ? String(status.dailyEntries) : '0';
     if (pnlEl) {
-      var pnl = status.dailyPnl != null ? status.dailyPnl : 0;
+      var pnl = status.dailyPnl != null ? Number(status.dailyPnl) : 0;
+      pnl = Number.isFinite(pnl) ? pnl : 0;
       pnlEl.textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%';
       pnlEl.className = 'font-mono ' + (pnl > 0 ? 'text-red-400' : pnl < 0 ? 'text-blue-400' : 'text-slate-200');
     }
-    if (priorityEl) priorityEl.textContent = status.priorityOwner || 'MAIN';
+    if (priorityEl) priorityEl.textContent = status.priorityOwner ? String(status.priorityOwner) : 'MAIN';
     if (riskHaltEl) {
       if (status.isRiskHalt) {
         riskHaltEl.classList.remove('hidden');

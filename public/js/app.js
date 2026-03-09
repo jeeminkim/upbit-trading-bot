@@ -80,25 +80,39 @@
   }
 
   /**
-   * 자산 카드: 총 매수(avg_buy_price 기준) / 현재 평가, 손익금·수익률 실시간
-   * 수익률(%) = (현재 총 평가액 / 총 매수 금액 - 1) * 100
+   * 자산 카드: 백엔드 업비트 양식 동기화 (Math.floor 절삭, 잡코인 제외)
+   * 백엔드 profitSummary 우선 사용 → 총매수, 총평가, 평가손익(이모지), 수익률(%.2f), 주문가능
    */
   function renderAssets(assets, fxUsdKrw, profitSummary) {
-    if (!assets) return;
-    var totalBuy = assets.totalBuyKrw != null ? assets.totalBuyKrw : (assets.totalBuyKrwForCoins || 0);
-    var totalEval = assets.totalEvaluationKrw != null ? assets.totalEvaluationKrw : 0;
-    var pnl = profitSummary && profitSummary.profitKrw != null ? profitSummary.profitKrw : (totalEval - totalBuy);
-    var rate = profitSummary && profitSummary.profitPct != null ? profitSummary.profitPct : (totalBuy > 0 ? (totalEval / totalBuy - 1) * 100 : 0);
+    if (!assets || typeof assets !== 'object') return;
+    var totalBuy = 0;
+    var totalEval = 0;
+    var orderable = assets.orderableKrw != null ? Math.floor(Number(assets.orderableKrw)) || 0 : 0;
+    var pnl = 0;
+    var rate = 0;
+    if (profitSummary && typeof profitSummary === 'object' && (profitSummary.totalBuyKrw != null || profitSummary.totalEval != null)) {
+      totalBuy = Math.floor(Number(profitSummary.totalBuyKrw)) || 0;
+      totalEval = Math.floor(Number(profitSummary.totalEval)) || 0;
+      pnl = Number(profitSummary.profitKrw);
+      if (profitSummary.profitPct != null && !Number.isNaN(Number(profitSummary.profitPct))) rate = Number(profitSummary.profitPct);
+      else rate = totalBuy > 0 ? ((totalEval - totalBuy) / totalBuy) * 100 : 0;
+    } else {
+      totalBuy = Math.floor(Number(assets.totalBuyKrwForCoins != null ? assets.totalBuyKrwForCoins : assets.totalBuyKrw)) || 0;
+      totalEval = Math.floor(Number(assets.totalEvaluationKrw)) || 0;
+      pnl = totalEval - totalBuy;
+      rate = totalBuy > 0 ? (pnl / totalBuy) * 100 : 0;
+    }
     setText('asset-buy', formatKrw(totalBuy));
     setText('asset-eval', formatKrw(totalEval));
-    setText('asset-orderable', formatKrw(assets.orderableKrw));
-    setText('asset-pnl', (pnl >= 0 ? '+' : '') + formatKrw(pnl));
-    setText('asset-rate', rate === 0 ? '+0.00 %' : (rate > 0 ? '+' : '') + formatPct(rate));
+    setText('asset-orderable', formatKrw(orderable));
+    var pnlStr = (pnl >= 0 ? '\uD83D\uDFE2 ' : '\uD83D\uDD34 ') + (pnl >= 0 ? '+' : '') + formatKrw(pnl);
+    setText('asset-pnl', pnlStr);
+    setText('asset-rate', (rate >= 0 ? '\uD83D\uDFE2 ' : '\uD83D\uDD34 ') + (rate >= 0 ? '+' : '') + Number(rate).toFixed(2) + ' %');
     var usdEl = document.getElementById('asset-usd');
-    var totalEval = assets.totalEvaluationKrw != null ? assets.totalEvaluationKrw : 0;
     if (usdEl) {
-      if (fxUsdKrw != null && fxUsdKrw > 0 && totalEval != null) {
-        var usd = totalEval / fxUsdKrw;
+      var fx = Number(fxUsdKrw);
+      if (fx > 0 && totalEval != null) {
+        var usd = totalEval / fx;
         usdEl.textContent = '$' + (usd >= 1000 ? usd.toFixed(0) : usd.toFixed(2));
       } else {
         usdEl.textContent = '—';
@@ -110,6 +124,83 @@
     var rateCls = rate > 0 ? 'text-red-400' : rate < 0 ? 'text-blue-400' : 'text-slate-300';
     if (pnlEl) pnlEl.className = 'text-lg font-bold mt-1 ' + pnlCls;
     if (rateEl) rateEl.className = 'text-lg font-bold mt-1 ' + rateCls;
+  }
+
+  function formatRemainingHMS(ms) {
+    if (ms == null || ms <= 0 || typeof ms !== 'number') return '—';
+    var totalSec = Math.floor(ms / 1000);
+    var h = Math.floor(totalSec / 3600);
+    var m = Math.floor((totalSec % 3600) / 60);
+    var s = totalSec % 60;
+    return (String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0') + ' 남음');
+  }
+
+  var modeRemainingCache = { scalpRemainingMs: 0, aiWeightRemaining: [], relaxedRemainingMs: 0 };
+  var modeCountdownTimer = null;
+
+  function renderModeRemaining(modeRemaining) {
+    if (!modeRemaining || typeof modeRemaining !== 'object') return;
+    modeRemainingCache.scalpRemainingMs = Number(modeRemaining.scalpRemainingMs) || 0;
+    modeRemainingCache.aiWeightRemaining = Array.isArray(modeRemaining.aiWeightRemaining) ? modeRemaining.aiWeightRemaining : [];
+    modeRemainingCache.relaxedRemainingMs = Number(modeRemaining.relaxedRemainingMs) || 0;
+    var scalpEl = document.getElementById('mode-scalp-remaining');
+    var aiEl = document.getElementById('mode-ai-remaining');
+    var relaxEl = document.getElementById('mode-relax-remaining');
+    if (scalpEl) scalpEl.textContent = modeRemainingCache.scalpRemainingMs > 0 ? formatRemainingHMS(modeRemainingCache.scalpRemainingMs) : '—';
+    if (aiEl) {
+      if (modeRemainingCache.aiWeightRemaining.length > 0) {
+        aiEl.textContent = modeRemainingCache.aiWeightRemaining.map(function (x) {
+          var ms = x && (x.remainingMs != null) ? Number(x.remainingMs) : 0;
+          return (x && x.ticker ? x.ticker : '') + ' ' + formatRemainingHMS(ms);
+        }).join(', ');
+      } else {
+        aiEl.textContent = '—';
+      }
+    }
+    if (relaxEl) relaxEl.textContent = modeRemainingCache.relaxedRemainingMs > 0 ? formatRemainingHMS(modeRemainingCache.relaxedRemainingMs) : '—';
+    var summaryEl = document.getElementById('mode-active-summary');
+    if (summaryEl) {
+      var parts = [];
+      if (modeRemainingCache.scalpRemainingMs > 0) parts.push('초단타 스캘프');
+      if (modeRemainingCache.aiWeightRemaining.length > 0) parts.push('AI 가중치(' + modeRemainingCache.aiWeightRemaining.map(function (x) { return x.ticker || ''; }).join('·') + ')');
+      if (modeRemainingCache.relaxedRemainingMs > 0) parts.push('기준 완화');
+      summaryEl.textContent = parts.length > 0 ? '활성: ' + parts.join(', ') : '활성 모드 없음';
+    }
+  }
+
+  function tickModeCountdown() {
+    var scalpEl = document.getElementById('mode-scalp-remaining');
+    var aiEl = document.getElementById('mode-ai-remaining');
+    var relaxEl = document.getElementById('mode-relax-remaining');
+    var summaryEl = document.getElementById('mode-active-summary');
+    if (modeRemainingCache.scalpRemainingMs > 0) {
+      modeRemainingCache.scalpRemainingMs -= 1000;
+      if (scalpEl) scalpEl.textContent = modeRemainingCache.scalpRemainingMs > 0 ? formatRemainingHMS(modeRemainingCache.scalpRemainingMs) : '—';
+    }
+    if (modeRemainingCache.relaxedRemainingMs > 0) {
+      modeRemainingCache.relaxedRemainingMs -= 1000;
+      if (relaxEl) relaxEl.textContent = modeRemainingCache.relaxedRemainingMs > 0 ? formatRemainingHMS(modeRemainingCache.relaxedRemainingMs) : '—';
+    }
+    for (var i = 0; i < modeRemainingCache.aiWeightRemaining.length; i++) {
+      if (modeRemainingCache.aiWeightRemaining[i].remainingMs > 0) {
+        modeRemainingCache.aiWeightRemaining[i].remainingMs -= 1000;
+      }
+    }
+    if (aiEl && modeRemainingCache.aiWeightRemaining.length > 0) {
+      aiEl.textContent = modeRemainingCache.aiWeightRemaining.map(function (x) {
+        return (x.ticker || '') + ' ' + formatRemainingHMS(x.remainingMs);
+      }).join(', ');
+    }
+    if (summaryEl) {
+      var parts = [];
+      if (modeRemainingCache.scalpRemainingMs > 0) parts.push('초단타 스캘프');
+      if (modeRemainingCache.aiWeightRemaining.length > 0) {
+        var activeAi = modeRemainingCache.aiWeightRemaining.filter(function (x) { return x.remainingMs > 0; });
+        if (activeAi.length > 0) parts.push('AI 가중치(' + activeAi.map(function (x) { return x.ticker || ''; }).join('·') + ')');
+      }
+      if (modeRemainingCache.relaxedRemainingMs > 0) parts.push('기준 완화');
+      summaryEl.textContent = parts.length > 0 ? '활성: ' + parts.join(', ') : '활성 모드 없음';
+    }
   }
 
   function setText(id, text) {
@@ -320,8 +411,9 @@
     document.body.addEventListener('mouseleave', onLeave, true);
   })();
 
-  /** 로그창: [BUY_COMPLETE] 금색 강조, [EXIT] 파랑, [에러] 빨강 */
+  /** 로그창: [BUY_COMPLETE] 금색 강조, [EXIT] 파랑, [에러] 빨강. 백엔드 HTML/비문자열 방지 */
   function colorizeLogLine(line) {
+    if (line == null || typeof line !== 'string') return escapeHtml(String(line != null ? line : ''));
     var tags = [
       { re: /\[BUY_COMPLETE\]/g, cls: 'text-amber-400 font-bold' },
       { re: /\[EXIT\]/g, cls: 'text-blue-400 font-semibold' },
@@ -367,7 +459,11 @@
     });
     if (hasAlert) playAlertSound();
 
-    var full = logs.slice(-100);
+    var full = logs.slice(-100).map(function (l) {
+      var s = typeof l === 'string' ? l : (l != null ? String(l) : '');
+      if (s.length > 2000) s = s.slice(0, 2000) + '…';
+      return s;
+    });
     var toShow = isMobile() && !logFullscreenOpen ? full.slice(-3) : full;
     if (el.logContainer) {
       var newHtml = toShow.map(function (l) {
@@ -455,17 +551,23 @@
 
   function renderFng(fng) {
     if (!el.fngValue || !el.fngFill) return;
-    if (!fng || fng.value == null) {
+    if (!fng || typeof fng !== 'object') {
       el.fngValue.textContent = '—';
       el.fngFill.setAttribute('stroke-dashoffset', 97);
       return;
     }
-    el.fngValue.textContent = fng.value;
-    var pct = fng.value / 100;
+    var val = Number(fng.value);
+    if (val !== val || !Number.isFinite(val)) {
+      el.fngValue.textContent = '—';
+      el.fngFill.setAttribute('stroke-dashoffset', 97);
+      return;
+    }
+    el.fngValue.textContent = String(val);
+    var pct = Math.max(0, Math.min(1, val / 100));
     el.fngFill.setAttribute('stroke-dashoffset', 97 - 97 * pct);
     var cls = 'gauge-fill fill-none stroke-[8] stroke-linecap-round ';
-    if (fng.value <= 25) cls += 'stroke-red-500';
-    else if (fng.value >= 75) cls += 'stroke-emerald-500';
+    if (val <= 25) cls += 'stroke-red-500';
+    else if (val >= 75) cls += 'stroke-emerald-500';
     else cls += 'stroke-amber-500';
     el.fngFill.setAttribute('class', cls);
   }
@@ -494,20 +596,38 @@
     }
   }
 
-  /** MPI 위젯 (Fear & Greed 근처) */
+  /** MPI 위젯 (Fear & Greed 근처). null/HTML 응답 방지로 크래시 방지 */
   function renderMpi(data) {
-    if (!el.mpiWidget || !data || !data.list || !data.list.length) return;
+    if (!el.mpiWidget) return;
+    if (!data || typeof data !== 'object' || !Array.isArray(data.list) || !data.list.length) {
+      el.mpiWidget.innerHTML = '<div class="text-slate-400 text-xs font-medium mb-1">MPI</div><div class="text-slate-500 text-xs">—</div>';
+      return;
+    }
     var html = '<div class="text-slate-400 text-xs font-medium mb-1">MPI</div>';
     data.list.forEach(function (item) {
-      var v = item.mpi != null ? item.mpi : '—';
-      var vel = item.mpi_velocity != null ? (item.mpi_velocity >= 0 ? '+' : '') + item.mpi_velocity.toFixed(1) : '';
-      html += '<div class="flex justify-between text-xs"><span>' + (item.symbol || '') + '</span><span class="text-amber-400">' + v + (vel ? ' (' + vel + ')' : '') + '</span></div>';
+      if (!item || typeof item !== 'object') return;
+      var v = item.mpi != null ? escapeHtml(String(item.mpi)) : '—';
+      var vel = '';
+      if (item.mpi_velocity != null && Number.isFinite(Number(item.mpi_velocity))) {
+        var nv = Number(item.mpi_velocity);
+        vel = (nv >= 0 ? '+' : '') + nv.toFixed(1);
+      }
+      html += '<div class="flex justify-between text-xs"><span>' + escapeHtml(String(item.symbol || '')) + '</span><span class="text-amber-400">' + v + (vel ? ' (' + escapeHtml(vel) + ')' : '') + '</span></div>';
     });
     el.mpiWidget.innerHTML = html;
   }
 
   function fetchMpi() {
-    fetch('/api/meme/mpi').then(function (r) { return r.json(); }).then(renderMpi).catch(function () {});
+    fetch('/api/meme/mpi')
+      .then(function (r) {
+        var ct = (r.headers.get('content-type') || '');
+        if (!r.ok || !ct.includes('application/json')) return Promise.reject(new Error('non-json'));
+        return r.json();
+      })
+      .then(function (data) {
+        if (data && typeof data === 'object') renderMpi(data);
+      })
+      .catch(function () {});
   }
 
   function setHeaderFxKimp(fxUsdKrw, kimpAvg) {
@@ -518,8 +638,11 @@
   }
 
   function renderMarketContext(ctx) {
-    setText('market-score-value', ctx && ctx.marketScore != null ? ctx.marketScore : '—');
-    setText('market-multiplier-value', ctx && ctx.recommendedMultiplier != null ? ctx.recommendedMultiplier.toFixed(2) : '—');
+    if (!ctx || typeof ctx !== 'object') return;
+    var score = ctx.marketScore != null ? Number(ctx.marketScore) : NaN;
+    var mult = ctx.recommendedMultiplier != null ? Number(ctx.recommendedMultiplier) : NaN;
+    setText('market-score-value', Number.isFinite(score) ? score : '—');
+    setText('market-multiplier-value', Number.isFinite(mult) ? mult.toFixed(2) : '—');
   }
 
   function renderStrategySummary(s) {
@@ -527,7 +650,7 @@
     var updatedEl = document.getElementById('strategy-updated-at');
     var contentEl = document.getElementById('strategy-summary-content');
     if (!contentEl) return;
-    if (!s || !s.created_at) {
+    if (!s || typeof s !== 'object' || !s.created_at) {
       if (nameEl) nameEl.textContent = '—';
       contentEl.textContent = '저장된 전략 없음. 설정에서 저장하면 이곳에 요약이 표시됩니다.';
       if (updatedEl) updatedEl.textContent = '—';
@@ -551,26 +674,34 @@
   }
 
   socket.on('dashboard', function (data) {
-    if (data.assets) renderAssets(data.assets, data.fxUsdKrw, data.profitSummary);
-    if (data.fxUsdKrw != null || data.kimpAvg != null) setHeaderFxKimp(data.fxUsdKrw, data.kimpAvg);
-    if (data.prices) renderPrices(data.prices);
-    if (data.kimpByMarket) renderKimp(data.kimpByMarket);
-    if (data.fng) renderFng(data.fng);
-    if (typeof data.botEnabled === 'boolean') setBotUi(data.botEnabled);
-    if (data.trades) renderTrades(data.trades);
-    if (data.rejectLogs) renderRejectLogs(data.rejectLogs);
-    if (data.marketContext) renderMarketContext(data.marketContext);
-    if (data.scalpState) renderScalpState(data.scalpState);
-    if (data.logs) renderLogs(data.logs);
-    if (data.wsLagMs != null) setWsLag(data.wsLagMs);
-    if (data.strategySummary) renderStrategySummary(data.strategySummary);
-    if (data.independentScalpStatus && window.updateIndependentScalpPanel) window.updateIndependentScalpPanel(data.independentScalpStatus);
-    var banner = document.getElementById('race-horse-banner');
-    if (banner) {
-      if (data.raceHorseActive) { banner.classList.remove('hidden'); banner.classList.add('flex'); }
-      else { banner.classList.add('hidden'); banner.classList.remove('flex'); }
+    if (!data || typeof data !== 'object') return;
+    try {
+      if (data.assets && typeof data.assets === 'object') renderAssets(data.assets, data.fxUsdKrw, data.profitSummary);
+      if (data.fxUsdKrw != null || data.kimpAvg != null) setHeaderFxKimp(data.fxUsdKrw, data.kimpAvg);
+      if (data.prices && typeof data.prices === 'object') renderPrices(data.prices);
+      if (data.kimpByMarket && typeof data.kimpByMarket === 'object') renderKimp(data.kimpByMarket);
+      if (data.fng && typeof data.fng === 'object') renderFng(data.fng);
+      if (typeof data.botEnabled === 'boolean') setBotUi(data.botEnabled);
+      if (Array.isArray(data.trades)) renderTrades(data.trades);
+      if (Array.isArray(data.rejectLogs)) renderRejectLogs(data.rejectLogs);
+      if (data.marketContext && typeof data.marketContext === 'object') renderMarketContext(data.marketContext);
+      if (data.scalpState != null && typeof data.scalpState === 'object') renderScalpState(data.scalpState);
+      if (Array.isArray(data.logs)) renderLogs(data.logs);
+      if (data.wsLagMs != null) setWsLag(data.wsLagMs);
+      if (data.strategySummary && typeof data.strategySummary === 'object') renderStrategySummary(data.strategySummary);
+      if (data.modeRemaining && typeof data.modeRemaining === 'object') renderModeRemaining(data.modeRemaining);
+      if (data.independentScalpStatus && typeof data.independentScalpStatus === 'object' && window.updateIndependentScalpPanel) window.updateIndependentScalpPanel(data.independentScalpStatus);
+      var banner = document.getElementById('race-horse-banner');
+      if (banner) {
+        if (data.raceHorseActive) { banner.classList.remove('hidden'); banner.classList.add('flex'); }
+        else { banner.classList.add('hidden'); banner.classList.remove('flex'); }
+      }
+    } catch (e) {
+      if (typeof console !== 'undefined' && console.warn) console.warn('[dashboard] render error:', e);
     }
   });
+
+  if (!modeCountdownTimer) modeCountdownTimer = setInterval(tickModeCountdown, 1000);
 
   if (el.botToggle) {
     el.botToggle.addEventListener('click', function () {
@@ -645,8 +776,20 @@
     btn.disabled = true;
     btn.textContent = '확인 중…';
     fetch('/api/check-upbit')
-      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        var ct = r.headers.get('content-type') || '';
+        if (!ct.includes('application/json')) return Promise.reject(new Error('서버가 JSON이 아닌 응답을 반환했습니다.'));
+        return r.json();
+      })
       .then(function (data) {
+        if (!data || typeof data !== 'object') {
+          apiPopupMsg.textContent = '연결 실패';
+          apiPopupMsg.className = 'text-center font-medium text-red-400';
+          apiPopupSysdate.textContent = '응답 형식 오류';
+          apiPopup.classList.remove('hidden');
+          apiPopup.classList.add('flex');
+          return;
+        }
         if (data.ok) {
           apiPopupMsg.textContent = '연결완료 : ' + (data.sysdate || '');
           apiPopupMsg.className = 'text-center font-medium text-emerald-400';
@@ -662,7 +805,7 @@
       .catch(function (err) {
         apiPopupMsg.textContent = '연결 실패';
         apiPopupMsg.className = 'text-center font-medium text-red-400';
-        apiPopupSysdate.textContent = err.message || '요청 오류';
+        apiPopupSysdate.textContent = (err && err.message) ? err.message : '요청 오류';
         apiPopup.classList.remove('hidden');
         apiPopup.classList.add('flex');
       })
