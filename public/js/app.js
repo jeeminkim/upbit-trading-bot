@@ -98,21 +98,25 @@
       else rate = totalBuy > 0 ? ((totalEval - totalBuy) / totalBuy) * 100 : 0;
     } else {
       totalBuy = Math.floor(Number(assets.totalBuyKrwForCoins != null ? assets.totalBuyKrwForCoins : assets.totalBuyKrw)) || 0;
-      totalEval = Math.floor(Number(assets.totalEvaluationKrw)) || 0;
+      var evalCoins = assets.evaluationKrwForCoins != null ? assets.evaluationKrwForCoins : assets.totalEvaluationKrw;
+      totalEval = Math.floor(Number(evalCoins)) || 0;
       pnl = totalEval - totalBuy;
       rate = totalBuy > 0 ? (pnl / totalBuy) * 100 : 0;
     }
     setText('asset-buy', formatKrw(totalBuy));
     setText('asset-eval', formatKrw(totalEval));
     setText('asset-orderable', formatKrw(orderable));
-    var pnlStr = (pnl >= 0 ? '\uD83D\uDFE2 ' : '\uD83D\uDD34 ') + (pnl >= 0 ? '+' : '') + formatKrw(pnl);
+    var pnlEmoji = pnl > 0 ? '\uD83D\uDFE2 ' : pnl < 0 ? '\uD83D\uDD34 ' : '\u26AA ';
+    var pnlStr = pnlEmoji + (pnl >= 0 ? '+' : '') + formatKrw(pnl);
     setText('asset-pnl', pnlStr);
-    setText('asset-rate', (rate >= 0 ? '\uD83D\uDFE2 ' : '\uD83D\uDD34 ') + (rate >= 0 ? '+' : '') + Number(rate).toFixed(2) + ' %');
+    var rateEmoji = rate > 0 ? '\uD83D\uDFE2 ' : rate < 0 ? '\uD83D\uDD34 ' : '\u26AA ';
+    setText('asset-rate', rateEmoji + (rate >= 0 ? '+' : '') + Number(rate).toFixed(2) + ' %');
     var usdEl = document.getElementById('asset-usd');
     if (usdEl) {
       var fx = Number(fxUsdKrw);
-      if (fx > 0 && totalEval != null) {
-        var usd = totalEval / fx;
+      var totalAssets = assets.totalEvaluationKrw != null ? Math.floor(Number(assets.totalEvaluationKrw)) : totalEval;
+      if (fx > 0 && totalAssets != null) {
+        var usd = totalAssets / fx;
         usdEl.textContent = '$' + (usd >= 1000 ? usd.toFixed(0) : usd.toFixed(2));
       } else {
         usdEl.textContent = '—';
@@ -120,8 +124,8 @@
     }
     var pnlEl = document.getElementById('asset-pnl');
     var rateEl = document.getElementById('asset-rate');
-    var pnlCls = pnl > 0 ? 'text-red-400' : pnl < 0 ? 'text-blue-400' : 'text-slate-300';
-    var rateCls = rate > 0 ? 'text-red-400' : rate < 0 ? 'text-blue-400' : 'text-slate-300';
+    var pnlCls = pnl > 0 ? 'text-red-400' : pnl < 0 ? 'text-blue-400' : 'text-slate-400';
+    var rateCls = rate > 0 ? 'text-red-400' : rate < 0 ? 'text-blue-400' : 'text-slate-400';
     if (pnlEl) pnlEl.className = 'text-lg font-bold mt-1 ' + pnlCls;
     if (rateEl) rateEl.className = 'text-lg font-bold mt-1 ' + rateCls;
   }

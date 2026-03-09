@@ -534,15 +534,17 @@ async function fetchAssets() {
 }
 
 /**
- * 수익률(%) 업비트 기준: (평가손익 / 총매수) * 100. 총매수 0이면 0% (에러 방지).
- * APENFT·PURSE·잡코인 제외된 assets(summarizeAccounts 결과) 기준.
+ * 수익률(%) 업비트 실거래 화면과 동일: (평가손익 합계 / 총매수금액 합계) * 100
+ * - 총매수금액: 보유 코인만 (평균단가*보유수량) 합계, KRW 제외
+ * - 평가손익: 각 코인 (현재가-평균단가)*보유수량 합계 (코인만)
+ * APENFT·PURSE·잡코인 제외. 총매수 0이면 0%.
  */
 function getProfitPct(assets) {
   if (!assets) return 0;
-  const totalEval = assets.totalEvaluationKrw ?? 0;
   const totalBuy = assets.totalBuyKrwForCoins ?? assets.totalBuyKrw ?? 0;
   if (totalBuy <= 0) return 0;
-  const profitLoss = totalEval - totalBuy;
+  const evalCoins = assets.evaluationKrwForCoins ?? 0;
+  const profitLoss = evalCoins - totalBuy;
   return (profitLoss / totalBuy) * 100;
 }
 
@@ -667,12 +669,13 @@ function buildCurrentStateEmbed(assets, summary, opts) {
       : (opts?.isRaceHorseMode === true ? '🔥 활성' : '❄️ 비활성');
   const w = (summary && summary.weights) || {};
   const totalBuyKrw = Math.floor(assets?.totalBuyKrwForCoins ?? assets?.totalBuyKrw ?? 0);
-  const totalEvalKrw = Math.floor(assets?.totalEvaluationKrw ?? 0);
+  const totalEvalCoins = Math.floor(assets?.evaluationKrwForCoins ?? 0);
   const orderableKrw = Math.floor(assets?.orderableKrw ?? 0);
-  const profitLossKrw = totalEvalKrw - totalBuyKrw;
+  const profitLossKrw = totalEvalCoins - totalBuyKrw;
   const profitPctNum = getProfitPct(assets);
   const profitRateStr = (totalBuyKrw <= 0 ? 0 : Math.floor(profitPctNum * 100) / 100).toFixed(2) + '%';
-  const profitPct = (profitPctNum >= 0 ? '🟢 ' : '🔴 ') + (profitPctNum >= 0 ? '+' : '') + profitRateStr;
+  const emoji = profitPctNum > 0 ? '🟢 ' : profitPctNum < 0 ? '🔴 ' : '⚪ ';
+  const profitPct = emoji + (profitPctNum >= 0 ? '+' : '') + profitRateStr;
   const strategyName = summary?.strategyName || 'SCALP 기본';
   const weightTable = [
     '| 항목 | 값 |',
@@ -688,7 +691,7 @@ function buildCurrentStateEmbed(assets, summary, opts) {
   const investmentSummary = [
     '**💰 투자 내역 요약**',
     `• **총매수**: ${totalBuyKrw.toLocaleString('ko-KR')} 원`,
-    `• **총평가**: ${totalEvalKrw.toLocaleString('ko-KR')} 원`,
+    `• **총평가**: ${totalEvalCoins.toLocaleString('ko-KR')} 원`,
     `• **평가손익**: ${profitLossKrw.toLocaleString('ko-KR')} 원`,
     `• **수익률**: ${profitPct}`,
     `• **주문가능**: ${orderableKrw.toLocaleString('ko-KR')} 원`
@@ -1181,14 +1184,13 @@ async function emitDashboard() {
     state.rejectLogs = await db.getRecentRejectLogs(20);
   } catch (e) {}
   const assets = state.assets;
-  const totalEval = assets?.totalEvaluationKrw ?? 0;
   const totalBuyKrw = assets?.totalBuyKrwForCoins ?? assets?.totalBuyKrw ?? 0;
-  const krw = assets?.orderableKrw ?? 0;
+  const totalEvalCoins = assets?.evaluationKrwForCoins ?? 0;
   const profitPct = getProfitPct(assets);
-  const profitKrw = totalEval - (totalBuyKrw + krw);
+  const profitKrw = totalEvalCoins - totalBuyKrw;
   state.lastEmit = {
     assets: state.assets,
-    profitSummary: { totalEval, totalBuyKrw, profitKrw, profitPct },
+    profitSummary: { totalEval: totalEvalCoins, totalBuyKrw, profitKrw, profitPct },
     modeRemaining: getModeRemainingOpts(),
     prices: state.prices,
     fng: state.fng,
@@ -1525,13 +1527,13 @@ setInterval(() => {
       state.lastEmit.wsLagMs = state.wsLagMs;
       state.lastEmit.assets = state.assets;
       const a = state.assets;
-      const te = Math.floor(Number(a?.totalEvaluationKrw ?? 0));
       const tb = Math.floor(Number(a?.totalBuyKrwForCoins ?? a?.totalBuyKrw ?? 0));
+      const teCoins = Math.floor(Number(a?.evaluationKrwForCoins ?? 0));
       const profitPctNum = getProfitPct(a);
       state.lastEmit.profitSummary = {
-        totalEval: te,
+        totalEval: teCoins,
         totalBuyKrw: tb,
-        profitKrw: te - tb,
+        profitKrw: teCoins - tb,
         profitPct: tb > 0 ? profitPctNum : 0
       };
       state.lastEmit.prices = state.prices;
@@ -2008,21 +2010,22 @@ const initPromise = (async () => {
       state.assets = await fetchAssets();
       const assets = state.assets;
       const totalBuyKrw = Math.floor(assets?.totalBuyKrwForCoins ?? assets?.totalBuyKrw ?? 0);
-      const totalEval = Math.floor(assets?.totalEvaluationKrw ?? 0);
+      const totalEvalCoins = Math.floor(assets?.evaluationKrwForCoins ?? 0);
       const totalKrw = Math.floor(assets?.orderableKrw ?? 0);
-      const profitLossKrw = totalEval - totalBuyKrw;
+      const profitLossKrw = totalEvalCoins - totalBuyKrw;
       const profitPctNum = getProfitPct(assets);
       const pctStr = (totalBuyKrw <= 0 ? 0 : Math.floor(profitPctNum * 100) / 100).toFixed(2) + '%';
-      const isProfit = profitLossKrw >= 0;
-      const arrow = isProfit ? '▲' : '▼';
-      const emoji = isProfit ? '🟢' : '🔴';
+      const isProfit = profitLossKrw > 0;
+      const isZero = profitLossKrw === 0;
+      const arrow = isProfit ? '▲' : isZero ? '－' : '▼';
+      const emoji = isProfit ? '🟢' : isZero ? '⚪' : '🔴';
       const profitLine =
         totalBuyKrw > 0
-          ? `${emoji} **현재 손익**: ${isProfit ? '+' : ''}${profitLossKrw.toLocaleString('ko-KR')}원 (${arrow} ${pctStr})`
-          : '🟢 **현재 손익**: 0원 (수익률 0.00%)';
+          ? `${emoji} **현재 손익**: ${isProfit ? '+' : ''}${profitLossKrw.toLocaleString('ko-KR')}원 (${arrow} ${profitPctNum >= 0 ? '+' : ''}${pctStr})`
+          : '⚪ **현재 손익**: 0원 (수익률 0.00%)';
       const summaryLine =
         totalBuyKrw > 0
-          ? `총 매수: ${totalBuyKrw.toLocaleString('ko-KR')}원 / 현재 총자산: ${totalEval.toLocaleString('ko-KR')}원`
+          ? `총 매수: ${totalBuyKrw.toLocaleString('ko-KR')}원 / 총평가(코인): ${totalEvalCoins.toLocaleString('ko-KR')}원`
           : '—';
       let holdingList = '없음';
       if (apiKeys.accessKey && apiKeys.secretKey) {
@@ -2037,13 +2040,13 @@ const initPromise = (async () => {
           holdingList = coins.length ? coins.map((a) => a.currency).join(', ') : '없음';
         } catch (_) {}
       }
-      const embedColor = isProfit ? 0x57f287 : 0xed4245;
+      const embedColor = isProfit ? 0x57f287 : isZero ? 0x95a5a6 : 0xed4245;
       const embed = new MessageEmbed()
-        .setTitle(isProfit ? '🟢 현재 수익률' : '🔴 현재 수익률')
+        .setTitle(isProfit ? '🟢 현재 수익률' : isZero ? '⚪ 현재 수익률' : '🔴 현재 수익률')
         .setColor(embedColor)
         .addFields(
           { name: '주문가능(KRW)', value: totalKrw.toLocaleString('ko-KR') + ' 원', inline: true },
-          { name: '총평가', value: totalEval.toLocaleString('ko-KR') + ' 원', inline: true },
+          { name: '총평가', value: totalEvalCoins.toLocaleString('ko-KR') + ' 원', inline: true },
           { name: '총매수', value: totalBuyKrw.toLocaleString('ko-KR') + ' 원', inline: true },
           { name: '평가 손익', value: profitLine + '\n' + summaryLine, inline: false },
           { name: '가동중인 종목', value: holdingList, inline: false }

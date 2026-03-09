@@ -179,10 +179,10 @@
       socket.on('dashboard', function (data) {
         const ps = data.profitSummary;
         const assets = data.assets;
-        const totalEval = ps?.totalEval ?? assets?.totalEvaluationKrw ?? null;
-        const totalBuy = ps?.totalBuyKrw ?? assets?.totalBuyKrw ?? assets?.totalBuyKrwForCoins ?? null;
+        const totalBuy = ps?.totalBuyKrw ?? assets?.totalBuyKrwForCoins ?? assets?.totalBuyKrw ?? null;
+        const totalEval = ps?.totalEval ?? assets?.evaluationKrwForCoins ?? assets?.totalEvaluationKrw ?? null;
         const profitKrw = ps?.profitKrw ?? (totalEval != null && totalBuy != null ? totalEval - totalBuy : null);
-        const profitPct = ps?.profitPct ?? (totalBuy > 0 && totalEval != null ? ((totalEval / totalBuy - 1) * 100) : null);
+        const profitPct = ps?.profitPct ?? (totalBuy > 0 && totalEval != null ? ((totalEval - totalBuy) / totalBuy * 100) : null);
         function fmt(v) { return v != null ? Number(v).toLocaleString('ko-KR') + '원' : '—'; }
         document.getElementById('orch-total-eval').textContent = fmt(totalEval);
         document.getElementById('orch-total-buy').textContent = fmt(totalBuy);
@@ -193,8 +193,8 @@
           profitEl.className = profitKrw >= 0 ? 'text-emerald-400' : 'text-red-400';
         }
         if (profitPct != null) {
-          pctEl.textContent = (profitPct >= 0 ? '▲' : '▼') + ' ' + profitPct.toFixed(2) + '%';
-          pctEl.className = profitPct >= 0 ? 'text-emerald-400' : 'text-red-400';
+          pctEl.textContent = (profitPct >= 0 ? '▲' : '▼') + ' ' + (profitPct >= 0 ? '+' : '') + profitPct.toFixed(2) + '%';
+          pctEl.className = profitPct > 0 ? 'text-emerald-400' : profitPct < 0 ? 'text-red-400' : 'text-slate-400';
         }
       });
     }

@@ -202,22 +202,23 @@
         document.getElementById('summary-orderable').textContent = '—';
         return;
       }
-      var buyCoins = assets.totalBuyKrwForCoins != null ? assets.totalBuyKrwForCoins : (assets.totalBuyKrw || 0);
-      var evalCoins = assets.evaluationKrwForCoins != null ? assets.evaluationKrwForCoins : (assets.totalEvaluationKrw || 0);
+      var buyCoins = Math.floor(Number(assets.totalBuyKrwForCoins != null ? assets.totalBuyKrwForCoins : (assets.totalBuyKrw || 0)));
+      var evalCoins = Math.floor(Number(assets.evaluationKrwForCoins != null ? assets.evaluationKrwForCoins : (assets.totalEvaluationKrw || 0)));
       var pnl = evalCoins - buyCoins;
       var rate = buyCoins > 0 ? (pnl / buyCoins) * 100 : 0;
       var totalEval = assets.totalEvaluationKrw != null ? assets.totalEvaluationKrw : 0;
-      document.getElementById('summary-krw').textContent = formatKrw(assets.orderableKrw);
-      document.getElementById('summary-total').textContent = formatKrw(totalEval);
-      document.getElementById('summary-buy').textContent = formatKrw(assets.totalBuyKrw);
-      document.getElementById('summary-eval').textContent = formatKrw(totalEval);
+      var orderable = Math.floor(Number(assets.orderableKrw || 0));
+      document.getElementById('summary-krw').textContent = formatKrw(orderable);
+      document.getElementById('summary-total').textContent = formatKrw(Math.floor(Number(totalEval)));
+      document.getElementById('summary-buy').textContent = formatKrw(buyCoins);
+      document.getElementById('summary-eval').textContent = formatKrw(evalCoins);
       var pnlEl = document.getElementById('summary-pnl');
-      pnlEl.textContent = formatKrw(pnl);
-      pnlEl.className = 'font-medium ' + (pnl > 0 ? 'text-red-400' : pnl < 0 ? 'text-blue-400' : 'text-slate-300');
+      pnlEl.textContent = (pnl >= 0 ? '+' : '') + formatKrw(pnl);
+      pnlEl.className = 'font-medium ' + (pnl > 0 ? 'text-red-400' : pnl < 0 ? 'text-blue-400' : 'text-slate-400');
       var rateEl = document.getElementById('summary-rate');
-      rateEl.textContent = rate === 0 ? '+0.00 %' : formatPct(rate);
-      rateEl.className = 'font-medium ' + (rate > 0 ? 'text-red-400' : rate < 0 ? 'text-blue-400' : 'text-slate-300');
-      document.getElementById('summary-orderable').textContent = formatKrw(assets.orderableKrw);
+      rateEl.textContent = (rate >= 0 ? '+' : '') + rate.toFixed(2) + ' %';
+      rateEl.className = 'font-medium ' + (rate > 0 ? 'text-red-400' : rate < 0 ? 'text-blue-400' : 'text-slate-400');
+      document.getElementById('summary-orderable').textContent = formatKrw(orderable);
     }
 
     function switchTab(tab) {
