@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>스캘핑 HTS · 자산 관리</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>tailwind.config = { darkMode: 'class', theme: { extend: {} } };</script>
+  <style>
+    body { background-color: #0f172a; }
+    .gauge-track { fill: none; stroke: #334155; stroke-width: 8; }
+    .gauge-fill { fill: none; stroke-width: 8; stroke-linecap: round; transition: stroke-dashoffset 0.3s; }
+    /* HTS 가격 플래시: 상승=빨강, 하락=파랑, 더 직관적으로 강화 */
+    .hts-flash-up {
+      animation: htsFlashUp 0.6s ease-out;
+      border-radius: 0.25rem;
+    }
+    .hts-flash-down {
+      animation: htsFlashDown 0.6s ease-out;
+      border-radius: 0.25rem;
+    }
+    @keyframes htsFlashUp {
+      0% { background-color: rgba(239, 68, 68, 0.7); box-shadow: 0 0 12px rgba(239, 68, 68, 0.5); }
+      50% { background-color: rgba(239, 68, 68, 0.3); }
+      100% { background-color: transparent; box-shadow: none; }
+    }
+    @keyframes htsFlashDown {
+      0% { background-color: rgba(59, 130, 246, 0.7); box-shadow: 0 0 12px rgba(59, 130, 246, 0.5); }
+      50% { background-color: rgba(59, 130, 246, 0.3); }
+      100% { background-color: transparent; box-shadow: none; }
+    }
+    #api-popup-overlay { background: rgba(0,0,0,0.6); }
+    #log-container { overflow-anchor: auto; }
+    @media (max-width: 768px) {
+      .log-section-collapsed { max-height: 5.5rem; overflow: hidden; }
+    }
+    #log-fullscreen { overscroll-behavior: contain; }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-[100dvh] p-4 md:p-6 pb-20 md:pb-6">
+  <div class="max-w-6xl mx-auto space-y-6">
+    <header class="flex flex-wrap items-center justify-between gap-4 border-b border-slate-600 pb-4">
+      <div>
+        <h1 class="text-xl md:text-2xl font-bold text-slate-100">스캘핑 HTS · 자산 관리</h1>
+        <p class="text-slate-400 text-sm mt-0.5">Upbit WebSocket + SCALP (P0 · Entry Score · 청산)</p>
+      </div>
+      <nav class="flex items-center gap-3 text-sm">
+        <a href="/" class="text-amber-400 font-medium">메인</a>
+        <a href="/orchestrator" class="text-slate-400 hover:text-slate-200">오케스트라</a>
+        <a href="/meme" class="text-slate-400 hover:text-slate-200">MPI 상세</a>
+        <a href="/stats" class="text-slate-400 hover:text-slate-200">수익률 통계</a>
+        <a href="/manual_trade" class="text-slate-400 hover:text-slate-200">수동거래테스트</a>
+        <a href="/settings" class="text-slate-400 hover:text-slate-200">설정</a>
+      </nav>
+      <div class="flex items-center gap-3 flex-wrap">
+        <span id="header-fx" class="text-slate-400 text-xs font-mono" title="USD/KRW">FX: —</span>
+        <span id="header-kimp" class="text-slate-400 text-xs font-mono" title="평균 김치 프리미엄">김프: —</span>
+        <span id="ws-lag-ms" class="text-amber-400 text-xs font-mono" title="WebSocket 지연(ms)">WS Lag: —</span>
+        <button id="api-check-btn" type="button" class="px-3 py-1.5 rounded-md bg-slate-600 hover:bg-slate-500 text-slate-200 text-sm border border-slate-500">API 연결 확인</button>
+        <span id="connection-status" class="text-slate-500 text-sm">연결 중…</span>
+        <div class="flex items-center gap-2">
+          <span class="text-slate-400 text-sm">SCALP</span>
+          <button id="bot-toggle" type="button" role="switch" aria-checked="false" class="relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent bg-slate-600 transition-colors focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 focus:ring-offset-slate-900">
+            <span id="bot-thumb" class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition translate-x-0.5"></span>
+          </button>
+          <span id="bot-label" class="text-slate-400 text-sm">OFF</span>
+        </div>
+      </div>
+    </header>
+
+    <div id="race-horse-banner" class="hidden rounded-lg border border-amber-500/50 bg-amber-500/20 px-4 py-2 mb-4 flex items-center justify-center gap-2 text-amber-300 font-medium text-sm">
+      🏇 경주마 모드 자동 가동 중
+    </div>
+
+    <section id="strategy-summary-bar" class="bg-slate-800/80 rounded-lg border border-slate-700 p-3 md:p-4 mb-4">
+      <div class="flex items-center justify-between flex-wrap gap-2">
+        <span class="text-slate-400 text-xs font-medium uppercase tracking-wider">현재 적용 전략 (Admin)</span>
+        <span id="strategy-updated-at" class="text-slate-500 text-xs">—</span>
+      </div>
+      <div id="strategy-name-display" class="mt-1 text-amber-400 font-semibold text-base">—</div>
+      <div id="strategy-summary-content" class="mt-2 text-slate-300 text-sm">로드 중…</div>
+    </section>
+
+    <section id="market-context-bar" class="bg-slate-800/80 rounded-lg border border-slate-700 p-3 md:p-4 mb-4 flex flex-wrap items-center gap-4">
+      <div class="flex items-center gap-2">
+        <span class="text-slate-400 text-xs font-medium uppercase tracking-wider">시장 에너지 점수</span>
+        <span id="market-score-value" class="text-lg font-bold text-amber-400">—</span>
+        <span class="text-slate-500 text-sm">/ 100</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="text-slate-400 text-xs font-medium uppercase tracking-wider">추천 비중</span>
+        <span id="market-multiplier-value" class="text-lg font-bold text-emerald-400">—</span>
+        <span class="text-slate-500 text-sm">배</span>
+      </div>
+    </section>
+
+    <section class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 md:gap-4">
+      <div class="bg-slate-800 rounded-lg p-3 md:p-4 border border-slate-700">
+        <h2 class="text-slate-400 text-xs font-medium uppercase tracking-wider">총 매수금액</h2>
+        <p id="asset-buy" class="text-sm md:text-lg font-bold text-slate-200 mt-1">—</p>
+      </div>
+      <div class="bg-slate-800 rounded-lg p-3 md:p-4 border border-slate-700">
+        <h2 class="text-slate-400 text-xs font-medium uppercase tracking-wider">총 평가금액</h2>
+        <p id="asset-eval" class="text-sm md:text-lg font-bold text-slate-200 mt-1">—</p>
+      </div>
+      <div class="bg-slate-800 rounded-lg p-3 md:p-4 border border-slate-700">
+        <h2 class="text-slate-400 text-xs font-medium uppercase tracking-wider">총 자산 (USD)</h2>
+        <p id="asset-usd" class="text-sm md:text-lg font-bold text-emerald-400 mt-1">—</p>
+      </div>
+      <div class="bg-slate-800 rounded-lg p-3 md:p-4 border border-slate-700">
+        <h2 class="text-slate-400 text-xs font-medium uppercase tracking-wider">주문 가능 (KRW)</h2>
+        <p id="asset-orderable" class="text-sm md:text-lg font-bold text-emerald-400 mt-1">—</p>
+      </div>
+      <a href="/stats" class="bg-slate-800 rounded-lg p-3 md:p-4 border border-slate-700 block hover:border-amber-500/50 transition-colors" title="수익률 통계로 이동">
+        <h2 class="text-slate-400 text-xs font-medium uppercase tracking-wider">평가 손익</h2>
+        <p id="asset-pnl" class="text-sm md:text-lg font-bold mt-1">—</p>
+      </a>
+      <div class="bg-slate-800 rounded-lg p-3 md:p-4 border border-slate-700">
+        <h2 class="text-slate-400 text-xs font-medium uppercase tracking-wider">수익률 (%)</h2>
+        <p id="asset-rate" class="text-sm md:text-lg font-bold mt-1">—</p>
+      </div>
+    </section>
+
+    <section>
+      <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">대상 코인 시세</h2>
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+        <div id="coin-BTC" class="bg-slate-800 rounded-lg p-3 md:p-4 border border-slate-700">
+          <div class="text-slate-400 text-xs">KRW-BTC</div>
+          <div id="price-BTC" class="text-sm md:text-lg font-bold text-amber-400 mt-1 transition-colors rounded">—</div>
+          <div id="kimp-BTC" class="text-xs text-slate-400 mt-0.5">—</div>
+          <div id="reject-BTC" class="coin-reject text-xs text-amber-400/90 mt-1 min-h-[1rem]"></div>
+          <div id="scalp-BTC" class="mt-2 text-xs text-slate-500 space-y-0.5"></div>
+        </div>
+        <div id="coin-ETH" class="bg-slate-800 rounded-lg p-3 md:p-4 border border-slate-700">
+          <div class="text-slate-400 text-xs">KRW-ETH</div>
+          <div id="price-ETH" class="text-sm md:text-lg font-bold text-amber-400 mt-1 transition-colors rounded">—</div>
+          <div id="kimp-ETH" class="text-xs text-slate-400 mt-0.5">—</div>
+          <div id="reject-ETH" class="coin-reject text-xs text-amber-400/90 mt-1 min-h-[1rem]"></div>
+          <div id="scalp-ETH" class="mt-2 text-xs text-slate-500 space-y-0.5"></div>
+        </div>
+        <div id="coin-XRP" class="bg-slate-800 rounded-lg p-3 md:p-4 border border-slate-700">
+          <div class="text-slate-400 text-xs">KRW-XRP</div>
+          <div id="price-XRP" class="text-sm md:text-lg font-bold text-amber-400 mt-1 transition-colors rounded">—</div>
+          <div id="kimp-XRP" class="text-xs text-slate-400 mt-0.5">—</div>
+          <div id="reject-XRP" class="coin-reject text-xs text-amber-400/90 mt-1 min-h-[1rem]"></div>
+          <div id="scalp-XRP" class="mt-2 text-xs text-slate-500 space-y-0.5"></div>
+        </div>
+        <div id="coin-SOL" class="bg-slate-800 rounded-lg p-3 md:p-4 border border-slate-700">
+          <div class="text-slate-400 text-xs">KRW-SOL</div>
+          <div id="price-SOL" class="text-sm md:text-lg font-bold text-amber-400 mt-1 transition-colors rounded">—</div>
+          <div id="kimp-SOL" class="text-xs text-slate-400 mt-0.5">—</div>
+          <div id="reject-SOL" class="coin-reject text-xs text-amber-400/90 mt-1 min-h-[1rem]"></div>
+          <div id="scalp-SOL" class="mt-2 text-xs text-slate-500 space-y-0.5"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="independent-scalp-panel" class="bg-slate-800 rounded-lg border border-slate-700 p-3 md:p-4 mb-4">
+      <div class="text-slate-400 text-xs font-medium uppercase tracking-wider mb-2">🚀 독립 초단타 스캘프 봇 (Independent)</div>
+      <div class="flex flex-wrap items-center gap-4 text-sm">
+        <div class="flex items-center gap-2">
+          <span class="text-slate-500">상태</span>
+          <span id="scalp-status" class="font-semibold text-slate-300">STOPPED</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-slate-500">남은시간</span>
+          <span id="scalp-timer" class="font-mono text-amber-400">00:00:00</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-slate-500">오늘 진입</span>
+          <span id="scalp-entries" class="font-mono text-slate-200">0</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-slate-500">오늘 손익</span>
+          <span id="scalp-pnl" class="font-mono text-slate-200">0.00%</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-slate-500">우선권</span>
+          <span id="scalp-priority" class="font-mono text-slate-200">MAIN</span>
+        </div>
+        <div id="scalp-risk-halt" class="hidden text-amber-400 text-xs">RISK_HALT (연속 손실)</div>
+      </div>
+      <p class="text-slate-500 text-xs mt-2">디스코드 현장 지휘관 패널에서 「독립 스캘프 3h」 버튼으로 3시간 시한부 가동 · 1시간 미만 시 연장 가능</p>
+    </section>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6">
+      <section id="log-section" class="log-section-collapsed md:max-h-none bg-slate-800 rounded-lg border border-slate-700 overflow-hidden flex flex-col" style="min-height: 120px;">
+        <div class="p-3 md:p-4 border-b border-slate-700 flex items-center justify-between flex-wrap gap-2">
+          <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider">실시간 로그</h2>
+          <div class="flex items-center gap-3">
+            <label class="flex items-center gap-2 text-slate-400 text-xs cursor-pointer">
+              <input type="checkbox" id="log-sound-check" class="rounded border-slate-500">
+              알림
+            </label>
+            <label class="md:hidden flex items-center gap-2 text-slate-400 text-xs cursor-pointer">
+              <input type="checkbox" id="log-vibrate-check" class="rounded border-slate-500">
+              진동
+            </label>
+            <button type="button" id="log-expand-btn" class="md:hidden text-amber-400 text-xs py-1 px-2 rounded border border-slate-600">전체 보기</button>
+          </div>
+        </div>
+        <div id="log-container" class="p-3 md:p-4 overflow-y-auto flex-1 font-mono text-xs text-slate-300 space-y-0.5"></div>
+      </section>
+      <section class="bg-slate-800 rounded-lg border border-slate-700 overflow-hidden flex flex-col" style="min-height: 280px;">
+        <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider p-4 border-b border-slate-700">거래 내역 (최근 10건, SQLite)</h2>
+        <div id="trades-container" class="p-4 overflow-y-auto flex-1 text-sm text-slate-300"></div>
+      </section>
+    </div>
+
+    <section class="bg-slate-800 rounded-lg border border-slate-700 overflow-hidden flex flex-col mt-4 md:mt-6" style="min-height: 120px;">
+      <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider p-3 md:p-4 border-b border-slate-700">최근 거절 사유</h2>
+      <div id="reject-logs-container" class="p-3 md:p-4 overflow-y-auto flex-1 text-xs md:text-sm text-slate-300"></div>
+    </section>
+  </div>
+
+  <nav id="bottom-nav" class="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-slate-800/95 border-t border-slate-700 flex justify-around items-center h-14 pb-[env(safe-area-inset-bottom)]">
+    <a href="/" class="flex flex-col items-center justify-center flex-1 py-2 text-amber-400 font-medium text-xs">메인</a>
+    <a href="/settings" class="flex flex-col items-center justify-center flex-1 py-2 text-slate-400 hover:text-slate-200 text-xs">설정</a>
+    <a href="/#log-section" class="flex flex-col items-center justify-center flex-1 py-2 text-slate-400 hover:text-slate-200 text-xs">로그</a>
+    <a href="/stats" class="flex flex-col items-center justify-center flex-1 py-2 text-slate-400 hover:text-slate-200 text-xs">수익통계</a>
+  </nav>
+
+  <div id="log-fullscreen" class="fixed inset-0 z-50 hidden flex-col bg-slate-900" style="background: #0f172a;">
+    <div class="p-4 border-b border-slate-700 flex items-center justify-between">
+      <h2 class="text-slate-200 font-medium">실시간 로그 (전체)</h2>
+      <button type="button" id="log-fullscreen-close" class="px-4 py-2 rounded-lg bg-slate-600 text-slate-200 text-sm">닫기</button>
+    </div>
+    <div id="log-fullscreen-container" class="flex-1 p-4 overflow-y-auto font-mono text-xs text-slate-300 space-y-0.5"></div>
+  </div>
+
+  <div id="api-popup-overlay" class="fixed inset-0 z-50 hidden items-center justify-center" style="background: rgba(0,0,0,0.6);">
+    <div class="bg-slate-800 rounded-xl border border-slate-600 shadow-2xl p-6 max-w-sm w-full mx-4">
+      <p id="api-popup-message" class="text-slate-100 text-center font-medium"></p>
+      <p id="api-popup-sysdate" class="text-slate-400 text-sm text-center mt-2"></p>
+      <div class="mt-4 flex justify-center"><button id="api-popup-close" type="button" class="px-4 py-2 rounded-lg bg-slate-600 hover:bg-slate-500 text-slate-200 text-sm">확인</button></div>
+    </div>
+  </div>
+
+  <div class="fixed bottom-4 right-4 flex gap-3 items-end">
+    <div id="mpi-widget" class="w-24 bg-slate-800/95 rounded-xl border border-slate-600 shadow-xl p-2 text-slate-300"></div>
+    <div class="w-28 h-28 flex flex-col items-center justify-center bg-slate-800/95 rounded-xl border border-slate-600 shadow-xl">
+      <span class="text-slate-400 text-xs">Fear & Greed</span>
+      <svg id="fng-gauge" class="w-20 h-20 -m-1" viewBox="0 0 36 36">
+        <path class="gauge-track" d="M18 2.5 a 15.5 15.5 0 0 1 0 31 a 15.5 15.5 0 0 1 0 -31" stroke-dasharray="97 97" stroke-dashoffset="0"/>
+        <path id="fng-fill" class="gauge-fill stroke-emerald-500" d="M18 2.5 a 15.5 15.5 0 0 1 0 31 a 15.5 15.5 0 0 1 0 -31" stroke-dasharray="97 97" stroke-dashoffset="97"/>
+      </svg>
+      <span id="fng-value" class="text-lg font-bold text-amber-400 -mt-2">—</span>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/js/app.js"></script>
+  <script src="/js/scalpPanel.js"></script>
+</body>
+</html>
