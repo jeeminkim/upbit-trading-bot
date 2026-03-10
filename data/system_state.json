@@ -1,8 +1,8 @@
 {
   "scalp_mode": {
-    "active": false,
-    "startTime": null,
-    "endTime": null
+    "active": true,
+    "startTime": 1773156223318,
+    "endTime": 1773167023318
   },
   "ai_weight": [],
   "soft_criteria": {
