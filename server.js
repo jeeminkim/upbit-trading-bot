@@ -1522,6 +1522,7 @@ tradeLogger.scheduleMemoryCleanup(CLEANUP_INTERVAL_MS);
  * @returns {Promise<{ freedBytes: number }>}
  */
 async function performSystemCleanup() {
+  // 매일 새벽 4시: 새 달 예산 갱신 또는 수동 결제 복구 시 AI 재시도
   EngineStateStore.update({ geminiEnabled: true });
   let freedBytes = 0;
   try {
@@ -2003,7 +2004,8 @@ const initPromise = (async () => {
       const profitPctNum = getProfitPct(assets);
       const totalEval = assets?.totalEvaluationKrw ?? 0;
       try {
-        if (!state.geminiEnabled) {
+        const { geminiEnabled } = EngineStateStore.get();
+        if (!geminiEnabled) {
           embed.addFields({
             name: '⚡ 실시간 요약',
             value: `현재 수익률: ${profitPctNum.toFixed(2)}% | ⚡ AI 일시 중지 (기본 매매 모드)`,
@@ -2017,7 +2019,9 @@ const initPromise = (async () => {
             : `현재 수익률: ${profitPctNum.toFixed(2)}%`;
           embed.addFields({ name: '⚡ 실시간 요약', value: geminiValue, inline: false });
         }
-      } catch (_) {
+      } catch (e) {
+        const gemini = require('./lib/gemini');
+        if (typeof gemini.handleGeminiError === 'function') gemini.handleGeminiError(e);
         embed.addFields({
           name: '⚡ 실시간 요약',
           value: `현재 수익률: ${profitPctNum.toFixed(2)}% | ⚡ Gemini 분석: —`,
@@ -2193,10 +2197,17 @@ const initPromise = (async () => {
           } catch (_) {}
           dataItems.push({ symbol, price, rsi, strength, trend5m });
         }
-        const report = state.geminiEnabled
-          ? await (require('./lib/gemini').askGeminiForScalpPoint(dataItems))
-          : null;
-        const text = report || (state.geminiEnabled ? '현재 AI 분석이 지연되고 있습니다. 잠시 후 시도해 주세요.' : 'AI 기능이 일시 중지되었습니다. (기본 매매 모드)');
+        const { geminiEnabled } = EngineStateStore.get();
+        let report = null;
+        if (geminiEnabled) {
+          try {
+            report = await require('./lib/gemini').askGeminiForScalpPoint(dataItems);
+          } catch (e) {
+            const gemini = require('./lib/gemini');
+            if (typeof gemini.handleGeminiError === 'function') gemini.handleGeminiError(e);
+          }
+        }
+        const text = report || (geminiEnabled ? '현재 AI 분석이 지연되고 있습니다. 잠시 후 시도해 주세요.' : 'AI 기능이 일시 중지되었습니다. (기본 매매 모드)');
         const recommendedTicker = extractRecommendedTicker(text);
         const tickerForConfirm =
           recommendedTicker && ALLOWED_AGGRESSIVE_TICKERS.includes(recommendedTicker) ? recommendedTicker : null;
@@ -2208,6 +2219,8 @@ const initPromise = (async () => {
         }
         return { text, recommendedTicker: tickerForConfirm };
       } catch (e) {
+        const gemini = require('./lib/gemini');
+        if (typeof gemini.handleGeminiError === 'function') gemini.handleGeminiError(e);
         return { text: 'AI 자동 분석 실패: ' + (e?.message || ''), recommendedTicker: null };
       }
     },
@@ -2409,11 +2422,13 @@ const initPromise = (async () => {
         }
 
         let geminiText = null;
-        if (state.geminiEnabled) {
+        if (EngineStateStore.get().geminiEnabled) {
           try {
             const gemini = require('./lib/gemini');
             geminiText = await gemini.askGeminiForScanVol(enriched);
           } catch (e) {
+            const gemini = require('./lib/gemini');
+            if (typeof gemini.handleGeminiError === 'function') gemini.handleGeminiError(e);
             geminiText = '연동 실패: ' + (e?.message || 'API 키 확인');
           }
         }
@@ -2469,11 +2484,13 @@ const initPromise = (async () => {
         const kimpStr = state.kimpAvg != null ? `김치 프리미엄(평균): ${state.kimpAvg.toFixed(2)}%` : '김프: —';
         const ctx = { fng: fngStr, btcTrend, topTickers: topTickersLines || '—', kimp: kimpStr };
         let summaryText = null;
-        if (state.geminiEnabled) {
+        if (EngineStateStore.get().geminiEnabled) {
           try {
             const gemini = require('./lib/gemini');
             summaryText = await gemini.askGeminiForMarketSummary(ctx);
           } catch (e) {
+            const gemini = require('./lib/gemini');
+            if (typeof gemini.handleGeminiError === 'function') gemini.handleGeminiError(e);
             summaryText = '시황 요약 생성 실패: ' + (e?.message || 'API 확인');
           }
         }
@@ -2623,13 +2640,15 @@ const initPromise = (async () => {
           if (trades?.length) dbContext += '최근 거래(최대 5건): ' + JSON.stringify(trades.slice(0, 5).map((t) => ({ ticker: t.ticker, side: t.side, reason: t.reason, net_return: t.net_return }))) + '\n';
           if (rejects?.length) dbContext += '최근 거절(최대 10건): ' + JSON.stringify(rejects.slice(0, 10).map((r) => ({ ticker: r.ticker, reason: r.reason }))) + '\n';
         } catch (_) {}
-        if (!state.geminiEnabled) {
+        if (!EngineStateStore.get().geminiEnabled) {
           return { content: 'AI 기능이 일시 중지되었습니다. (예산 초과 등으로 구글 결제 차단 시 기본 모드로 전환됩니다.)' };
         }
         const gemini = require('./lib/gemini');
         const analysis = await gemini.askGeminiForLogAnalysis(logText, dbContext || undefined);
         return { content: analysis || '분석 결과를 생성하지 못했습니다.' };
       } catch (e) {
+        const gemini = require('./lib/gemini');
+        if (typeof gemini.handleGeminiError === 'function') gemini.handleGeminiError(e);
         return { content: '로그 분석 오류: ' + (e?.message || '알 수 없음') };
       }
     },
@@ -2641,7 +2660,7 @@ const initPromise = (async () => {
         const tradesText = trades.length
           ? trades.map((t) => JSON.stringify({ ticker: t.ticker, side: t.side, timestamp: t.timestamp, price: t.price, quantity: t.quantity, net_return: t.net_return, reason: t.reason, rsi: t.rsi, trend_score: t.trend_score })).join('\n')
           : '최근 거래 이력이 없습니다. 매수/매도가 발생하면 여기에 기록됩니다.';
-        if (!state.geminiEnabled) {
+        if (!EngineStateStore.get().geminiEnabled) {
           return { content: 'AI 기능이 일시 중지되었습니다. (예산 초과로 구글 결제 차단 시 기본 매매 모드로 전환됩니다.)' };
         }
         const gemini = require('./lib/gemini');
@@ -2649,6 +2668,8 @@ const initPromise = (async () => {
         if (lesson) tradeHistoryLogger.appendStrategyMemory(lesson);
         return { content: analysis };
       } catch (e) {
+        const gemini = require('./lib/gemini');
+        if (typeof gemini.handleGeminiError === 'function') gemini.handleGeminiError(e);
         return { content: '조언자 분석 오류: ' + (e?.message || '알 수 없음') };
       }
     }
