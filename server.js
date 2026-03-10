@@ -30,6 +30,20 @@ process.on('uncaughtException', (err) => {
 
 // 이 프로세스의 디스코드 봇: DISCORD_TOKEN 또는 DISCORD_BOT_TOKEN만 사용 (매매/제어 봇 1개). MarketSearchEngine은 별도 프로세스(market_search.js)에서 MARKET_BOT_TOKEN 사용.
 const fs = require('fs');
+// 단일 인스턴스: 중복 기동 방지
+const SERVER_LOCK_PATH = path.join(__dirname, '.server.lock');
+(function ensureSingleInstance() {
+  if (fs.existsSync(SERVER_LOCK_PATH)) {
+    const stat = fs.statSync(SERVER_LOCK_PATH);
+    if (Date.now() - stat.mtimeMs < 120000) {
+      console.error('[server] Another instance may be running (.server.lock). Exiting.');
+      process.exit(1);
+    }
+    try { fs.unlinkSync(SERVER_LOCK_PATH); } catch (_) {}
+  }
+  fs.writeFileSync(SERVER_LOCK_PATH, String(process.pid));
+  process.on('exit', () => { try { fs.unlinkSync(SERVER_LOCK_PATH); } catch (_) {} });
+})();
 const http = require('http');
 const express = require('express');
 const { Server } = require('socket.io');
@@ -58,6 +72,8 @@ const scalpRunner = require('./lib/scalp_independent/scalpRunner');
 const scalpState = require('./lib/scalp_independent/scalpState');
 const systemStatePersistence = require('./lib/systemStatePersistence');
 const tradeHistoryLogger = require('./lib/tradeHistoryLogger');
+const EngineStateStore = require('./domain/state/EngineStateStore');
+const TradingEngine = require('./domain/trading/TradingEngine');
 const geminiResolvedPath = require.resolve('./lib/gemini');
 const geminiModule = require('./lib/gemini');
 console.log('[Gemini] server.js가 로드한 gemini 모듈 절대경로:', geminiResolvedPath);
@@ -138,6 +154,9 @@ function isUpbitAuthError(err) {
 }
 
 async function withUpbitFailover(fn) {
+  if (typeof state !== 'undefined' && state.emergencyPauseUntil != null && Date.now() < state.emergencyPauseUntil) {
+    throw new Error('Emergency pause: Upbit API 1분 일시 중단');
+  }
   try {
     return await fn();
   } catch (e) {
@@ -478,7 +497,7 @@ app.get('/api/check-upbit', async (req, res) => {
   }
 });
 
-let state = {
+EngineStateStore.init({
   assets: null,
   prices: {},
   fng: null,
@@ -497,8 +516,12 @@ let state = {
   currentStrategyId: null,
   strategySummary: null,
   accounts: [],
-  lastOrchestratorResult: null
-};
+  lastOrchestratorResult: null,
+  serviceStopped: false,
+  emergencyPauseUntil: null,
+  geminiEnabled: true
+});
+const state = EngineStateStore.get();
 
 const priceHistory = {};
 SCALP_MARKETS.forEach(m => { priceHistory[m] = []; });
@@ -604,17 +627,15 @@ function getCurrentSystemState() {
     soft_criteria: {
       active: relaxedRemaining > 0,
       endTime: relaxedRemaining > 0 ? Date.now() + relaxedRemaining : null
-    }
+    },
+    gemini_enabled: state.geminiEnabled !== false
   };
 }
 
 function persistSystemState() {
-  try {
-    systemStatePersistence.save(getCurrentSystemState());
-  } catch (e) {
-    console.warn('[systemState] persist:', e?.message);
-  }
+  EngineStateStore.savePersisted(getCurrentSystemState);
 }
+EngineStateStore.setPersistCallback(getCurrentSystemState);
 
 /** buildCurrentStateEmbed opts에 넣을 모드별 남은 시간 */
 function getModeRemainingOpts() {
@@ -631,7 +652,7 @@ function getModeRemainingOpts() {
 }
 
 function restoreSystemState() {
-  const loaded = systemStatePersistence.load();
+  const loaded = EngineStateStore.loadPersisted();
   const now = Date.now();
   if (loaded.scalp_mode.active && loaded.scalp_mode.endTime != null && loaded.scalp_mode.endTime > now) {
     scalpState.restoreFromPersistence(loaded.scalp_mode.endTime);
@@ -648,6 +669,10 @@ function restoreSystemState() {
     const ttlMs = loaded.soft_criteria.endTime - now;
     StrategyManager.setRelaxedMode(ttlMs);
     console.log('[Boot] system_state: 기준 완화 복구됨 (만료:', new Date(loaded.soft_criteria.endTime).toISOString(), ')');
+  }
+  if (loaded.gemini_enabled === false) {
+    EngineStateStore.update({ geminiEnabled: false });
+    console.log('[Boot] system_state: Gemini AI 비활성 상태 복구됨 (결제 차단 등)');
   }
   // 만료된 모드 제거 후 파일 갱신하여 크기 최소화
   const pruned = systemStatePersistence.pruneExpiredState(loaded);
@@ -1251,66 +1276,83 @@ upbitWs.subscribeTicker(SCALP_MARKETS, (tick) => {
 fetchFx().catch(() => {});
 fetchBinance().catch(() => {});
 
-setInterval(async () => {
-  try {
-    updateRaceHorseState();
-    state.assets = await fetchAssets();
-    if (state.botEnabled && apiKeys.accessKey && apiKeys.secretKey) {
-      try {
-        state.accounts = await withUpbitFailover(async () => {
-          const k = getActiveUpbitKeys();
-          return upbit.getAccounts(k.accessKey, k.secretKey) || [];
-        });
-      } catch (_) {
-        state.accounts = state.accounts || [];
-      }
-    } else {
+const MARKET_ANALYZER_REP = 'KRW-BTC';
+const MEDIUM_TERM_MS = 60 * 1000;
+const DAILY_TERM_MS = 5 * 60 * 1000;
+const CLEANUP_INTERVAL_MS = configDefault.CLEANUP_INTERVAL_MS != null ? configDefault.CLEANUP_INTERVAL_MS : 4 * 60 * 60 * 1000;
+const TMP_DIR = path.join(__dirname, 'tmp');
+const CLEANUP_HOUR_4AM = 4;
+
+const tradingEngine = new TradingEngine(EngineStateStore, {
+  ASSET_POLL_MS,
+  FX_POLL_MS,
+  MEDIUM_TERM_MS,
+  DAILY_TERM_MS,
+  PERSIST_MS: 60 * 1000,
+  REJECT_EMIT_MS: 1000,
+  CLEANUP_INTERVAL_MS,
+  CLEANUP_HOUR_4AM
+});
+
+async function runOneTick() {
+  updateRaceHorseState();
+  state.assets = await fetchAssets();
+  if (state.botEnabled && apiKeys.accessKey && apiKeys.secretKey) {
+    try {
+      state.accounts = await withUpbitFailover(async () => {
+        const k = getActiveUpbitKeys();
+        return upbit.getAccounts(k.accessKey, k.secretKey) || [];
+      });
+    } catch (_) {
       state.accounts = state.accounts || [];
     }
-    state.fng = await fetchFng();
-    state.trades = await db.getRecentTrades(10);
-    computeKimp();
-    await runScalpCycle();
-    await runExitPipeline();
+  } else {
+    state.accounts = state.accounts || [];
+  }
+  state.fng = await fetchFng();
+  state.trades = await db.getRecentTrades(10);
+  computeKimp();
+  await runScalpCycle();
+  await runExitPipeline();
 
-    const mpiList = memeEngine.getAllMPI();
-    const mpiBySymbol = {};
-    (mpiList || []).forEach((p) => { mpiBySymbol[p.symbol] = p.mpi; });
-    const orchCtx = {
-      scalpState: state.scalpState,
-      profile: scalpEngine.getProfile(),
-      regimeLines: regimeDetector.readLastLines(32),
-      mpiBySymbol,
-      accounts: state.accounts,
-      assets: state.assets,
-      recentTrades: state.trades || [],
-      wsLagMs: state.wsLagMs
-    };
-    const orchResult = orchestrator.tick(orchCtx);
-    state.lastOrchestratorResult = orchResult;
+  const mpiList = memeEngine.getAllMPI();
+  const mpiBySymbol = {};
+  (mpiList || []).forEach((p) => { mpiBySymbol[p.symbol] = p.mpi; });
+  const orchCtx = {
+    scalpState: state.scalpState,
+    profile: scalpEngine.getProfile(),
+    regimeLines: regimeDetector.readLastLines(32),
+    mpiBySymbol,
+    accounts: state.accounts,
+    assets: state.assets,
+    recentTrades: state.trades || [],
+    wsLagMs: state.wsLagMs
+  };
+  const orchResult = orchestrator.tick(orchCtx);
+  state.lastOrchestratorResult = orchResult;
 
-    try {
-      const decisionLog = orchestrator.getDecisionLog();
-      const history = orchestrator.readHistoryLines(20);
-      const p0Summary = (state.scalpState && typeof state.scalpState === 'object')
-        ? Object.entries(state.scalpState).map(([m, s]) => ({ market: m, p0Allowed: s?.pipeline?.p0Allowed, p0Reason: s?.pipeline?.p0Reason })).filter((e) => e.p0Allowed === false || e.p0Reason)
-        : [];
-      const decisionSummary30Min = orchestrator.getDecisionSummary30Min(decisionLog || []);
-      io.emit('orchestrator:update', {
-        decisionLog: decisionLog || [],
-        decisionSummary30Min: decisionSummary30Min || [],
-        history: history || [],
-        lastResult: { action: orchResult.action, chosenStrategy: orchResult.chosenStrategy, finalScore: orchResult.finalScore, reason: orchResult.reason, signal: orchResult.signal },
-        scalpSignal: orchCtx.scalpState ? (require('./lib/strategy/scalpSignalProvider').getBestScalpSignal(state.scalpState, scalpEngine.getProfile(), scalpEngine.getProfile()?.entry_score_min)) : null,
-        regimeSignal: (require('./lib/strategy/regimeSignalProvider').getBestRegimeSignal(regimeDetector.readLastLines(32), mpiBySymbol)),
-        p0Summary
-      });
-    } catch (e) { /* non-fatal */ }
+  try {
+    const decisionLog = orchestrator.getDecisionLog();
+    const history = orchestrator.readHistoryLines(20);
+    const p0Summary = (state.scalpState && typeof state.scalpState === 'object')
+      ? Object.entries(state.scalpState).map(([m, s]) => ({ market: m, p0Allowed: s?.pipeline?.p0Allowed, p0Reason: s?.pipeline?.p0Reason })).filter((e) => e.p0Allowed === false || e.p0Reason)
+      : [];
+    const decisionSummary30Min = orchestrator.getDecisionSummary30Min(decisionLog || []);
+    io.emit('orchestrator:update', {
+      decisionLog: decisionLog || [],
+      decisionSummary30Min: decisionSummary30Min || [],
+      history: history || [],
+      lastResult: { action: orchResult.action, chosenStrategy: orchResult.chosenStrategy, finalScore: orchResult.finalScore, reason: orchResult.reason, signal: orchResult.signal },
+      scalpSignal: orchCtx.scalpState ? (require('./lib/strategy/scalpSignalProvider').getBestScalpSignal(state.scalpState, scalpEngine.getProfile(), scalpEngine.getProfile()?.entry_score_min)) : null,
+      regimeSignal: (require('./lib/strategy/regimeSignalProvider').getBestRegimeSignal(regimeDetector.readLastLines(32), mpiBySymbol)),
+      p0Summary
+    });
+  } catch (e) { /* non-fatal */ }
 
-    if (state.botEnabled && orchResult.action === 'ENTER' && orchResult.signal && apiKeys.accessKey && apiKeys.secretKey) {
-      if (scalpState.priorityOwner === 'SCALP') {
-        // 독립 스캘프 봇 가동 중: 메인 오케스트레이터 진입 차단 (우선권 탈취)
-      } else {
+  if (state.botEnabled && orchResult.action === 'ENTER' && orchResult.signal && apiKeys.accessKey && apiKeys.secretKey) {
+    if (scalpState.priorityOwner === 'SCALP') {
+      // 독립 스캘프 봇 가동 중: 메인 오케스트레이터 진입 차단 (우선권 탈취)
+    } else {
       const market = 'KRW-' + orchResult.signal.symbol;
       state.assets = await fetchAssets();
       const orderableKrw = state.assets?.orderableKrw ?? 0;
@@ -1338,128 +1380,149 @@ setInterval(async () => {
         quantityKrw = Math.min(quantityKrw, Math.floor(orderableKrw * 0.99));
       }
       if (quantityKrw >= (configDefault.MIN_ORDER_KRW || 5000)) {
-            try {
-              const order = await withUpbitFailover(() => {
-                const k = getActiveUpbitKeys();
-                return TradeExecutor.placeMarketBuyByPrice(k.accessKey, k.secretKey, market, Math.round(quantityKrw), orderableKrw);
-              });
-              const price = order && (order.price != null ? order.price : order.avg_price);
-              const volume = order && (order.executed_volume != null ? order.executed_volume : order.volume);
-              recordTrade({
-                timestamp: new Date().toISOString(),
-                ticker: market,
-                side: 'buy',
-                price: price ?? 0,
-                quantity: volume ?? 0,
-                fee: 0,
-                revenue: 0,
-                net_return: 0,
-                reason: 'ORCH_' + (orchResult.chosenStrategy || 'ENTER'),
-                strategy_id: state.currentStrategyId
-              });
-              orchestrator.recordEntry(orchResult.signal.symbol, orchResult.chosenStrategy);
-              state.assets = await fetchAssets();
-              emitDashboard().catch(() => {});
-            } catch (err) {
-              const isInsufficient = err?.code === 'INSUFFICIENT_FUNDS_BID' || (err?.message && String(err.message).includes('INSUFFICIENT_FUNDS_BID'));
-              tradeLogger.logTag('에러', 'Orchestrator ENTER 주문 실패: ' + (err?.message || ''));
-              if (isInsufficient && discordBot.sendToChannel) {
-                discordBot.sendToChannel('⚠️ 잔액 부족으로 매수 건너뜀 (주문가능KRW 부족)').catch(() => {});
-              } else if (!isInsufficient && discordBot.sendErrorAlert) {
-                discordBot.sendErrorAlert('오케스트레이터 매수 실패', err?.message).catch(() => {});
-              }
-            }
-          } else if (quantityKrw > 0 && quantityKrw < (configDefault.MIN_ORDER_KRW || 5000)) {
-            tradeLogger.logTag('거절', 'Orchestrator ENTER: 주문가능KRW 부족으로 매수 스킵 (최소주문금액 미달)', { market, quantityKrw, orderableKrw });
-            if (discordBot.sendToChannel) discordBot.sendToChannel('⚠️ 잔액 부족으로 매수 건너뜀 (최소 주문금액 미달)').catch(() => {});
+        try {
+          const order = await withUpbitFailover(() => {
+            const k = getActiveUpbitKeys();
+            return TradeExecutor.placeMarketBuyByPrice(k.accessKey, k.secretKey, market, Math.round(quantityKrw), orderableKrw);
+          });
+          const price = order && (order.price != null ? order.price : order.avg_price);
+          const volume = order && (order.executed_volume != null ? order.executed_volume : order.volume);
+          recordTrade({
+            timestamp: new Date().toISOString(),
+            ticker: market,
+            side: 'buy',
+            price: price ?? 0,
+            quantity: volume ?? 0,
+            fee: 0,
+            revenue: 0,
+            net_return: 0,
+            reason: 'ORCH_' + (orchResult.chosenStrategy || 'ENTER'),
+            strategy_id: state.currentStrategyId
+          });
+          orchestrator.recordEntry(orchResult.signal.symbol, orchResult.chosenStrategy);
+          state.assets = await fetchAssets();
+          emitDashboard().catch(() => {});
+        } catch (err) {
+          const isInsufficient = err?.code === 'INSUFFICIENT_FUNDS_BID' || (err?.message && String(err.message).includes('INSUFFICIENT_FUNDS_BID'));
+          tradeLogger.logTag('에러', 'Orchestrator ENTER 주문 실패: ' + (err?.message || ''));
+          if (isInsufficient && discordBot.sendToChannel) {
+            discordBot.sendToChannel('⚠️ 잔액 부족으로 매수 건너뜀 (주문가능KRW 부족)').catch(() => {});
+          } else if (!isInsufficient && discordBot.sendErrorAlert) {
+            discordBot.sendErrorAlert('오케스트레이터 매수 실패', err?.message).catch(() => {});
           }
+        }
+      } else if (quantityKrw > 0 && quantityKrw < (configDefault.MIN_ORDER_KRW || 5000)) {
+        tradeLogger.logTag('거절', 'Orchestrator ENTER: 주문가능KRW 부족으로 매수 스킵 (최소주문금액 미달)', { market, quantityKrw, orderableKrw });
+        if (discordBot.sendToChannel) discordBot.sendToChannel('⚠️ 잔액 부족으로 매수 건너뜀 (최소 주문금액 미달)').catch(() => {});
+      }
     }
-    }
-
-    // 독립 초단타 스캘프 봇 틱 (우선권 SCALP 시 자체 진입/청산)
-    try {
-      scalpRunner.tick({
-        upbit,
-        state,
-        apiKeys,
-        TradeExecutor,
-        recordTrade,
-        emitDashboard,
-        sendAlert: (msg) => { if (discordBot.sendToChannel) discordBot.sendToChannel(msg).catch(() => {}); }
-      });
-    } catch (e) {
-      console.warn('scalpRunner.tick:', e?.message);
-    }
-  } catch (err) {
-    console.error('poll error:', err.message);
   }
-  emitDashboard().catch((e) => console.error('emitDashboard:', e.message));
-}, ASSET_POLL_MS);
 
-setInterval(persistSystemState, 60 * 1000);
-
-setInterval(() => {
-  fetchFx().catch(() => {});
-  fetchBinance().catch(() => {});
-}, FX_POLL_MS);
-
-const MARKET_ANALYZER_REP = 'KRW-BTC';
-const MEDIUM_TERM_MS = 60 * 1000;
-const DAILY_TERM_MS = 5 * 60 * 1000;
-setTimeout(async () => {
   try {
-    const profile = scalpEngine.getProfile();
-    const maxBet = profile.max_bet_multiplier != null ? profile.max_bet_multiplier : 2;
-    state.marketContext = await MarketAnalyzer.tickMediumTerm(MARKET_ANALYZER_REP, maxBet);
+    scalpRunner.tick({
+      upbit,
+      state,
+      apiKeys,
+      TradeExecutor,
+      recordTrade,
+      emitDashboard,
+      sendAlert: (msg) => { if (discordBot.sendToChannel) discordBot.sendToChannel(msg).catch(() => {}); }
+    });
   } catch (e) {
-    console.warn('MarketAnalyzer warmup:', e && e.message);
+    console.warn('scalpRunner.tick:', e?.message);
   }
-}, 3000);
-setInterval(async () => {
-  try {
-    const profile = scalpEngine.getProfile();
-    const maxBet = profile.max_bet_multiplier != null ? profile.max_bet_multiplier : 2;
-    state.marketContext = await MarketAnalyzer.tickMediumTerm(MARKET_ANALYZER_REP, maxBet);
-  } catch (e) {}
-}, MEDIUM_TERM_MS);
-setTimeout(async () => {
-  try {
-    const profile = scalpEngine.getProfile();
-    const maxBet = profile.max_bet_multiplier != null ? profile.max_bet_multiplier : 2;
-    state.marketContext = await MarketAnalyzer.tickDaily(MARKET_ANALYZER_REP, maxBet);
-  } catch (e) {}
-}, 15000);
-setInterval(async () => {
-  try {
-    const profile = scalpEngine.getProfile();
-    const maxBet = profile.max_bet_multiplier != null ? profile.max_bet_multiplier : 2;
-    state.marketContext = await MarketAnalyzer.tickDaily(MARKET_ANALYZER_REP, maxBet);
-  } catch (e) {}
-}, DAILY_TERM_MS);
-
-// 거절 로그 4시간 단위 삭제: Logger 모듈에서 스케줄 (단일 책임)
-tradeLogger.scheduleRejectLogCleanup(db, configDefault.CLEANUP_INTERVAL_MS, configDefault.REJECT_LOG_CUTOFF_HOURS);
-tradeLogger.scheduleMemoryCleanup(configDefault.CLEANUP_INTERVAL_MS);
-
-const CLEANUP_INTERVAL_MS = configDefault.CLEANUP_INTERVAL_MS != null ? configDefault.CLEANUP_INTERVAL_MS : 4 * 60 * 60 * 1000;
-const TMP_DIR = path.join(__dirname, 'tmp');
-const CLEANUP_HOUR_4AM = 4; // 매일 새벽 4시(KST) 시스템 최적화
+}
 
 function runDbCleanup() {
   db.cleanupOldNonTrades(4).then((deleted) => {
-    if (deleted > 0) {
-      console.log(`DB Cleanup: ${deleted}개의 불필요한 로그를 삭제했습니다.`);
-    }
+    if (deleted > 0) console.log(`DB Cleanup: ${deleted}개의 불필요한 로그를 삭제했습니다.`);
   }).catch((e) => console.error('runDbCleanup:', e.message));
 }
-setTimeout(runDbCleanup, 60 * 1000);
-setInterval(runDbCleanup, CLEANUP_INTERVAL_MS);
+
+let lastCleanupDate = null;
+function getTradingEngineCallbacks() {
+  return {
+    runOneTick,
+    runFx: () => {
+      fetchFx().catch(() => {});
+      fetchBinance().catch(() => {});
+    },
+    runMarketAnalyzerMedium: async () => {
+      try {
+        const profile = scalpEngine.getProfile();
+        const maxBet = profile.max_bet_multiplier != null ? profile.max_bet_multiplier : 2;
+        state.marketContext = await MarketAnalyzer.tickMediumTerm(MARKET_ANALYZER_REP, maxBet);
+      } catch (e) {}
+    },
+    runMarketAnalyzerDaily: async () => {
+      try {
+        const profile = scalpEngine.getProfile();
+        const maxBet = profile.max_bet_multiplier != null ? profile.max_bet_multiplier : 2;
+        state.marketContext = await MarketAnalyzer.tickDaily(MARKET_ANALYZER_REP, maxBet);
+      } catch (e) {}
+    },
+    runPersist: persistSystemState,
+    runRejectEmit: () => {
+      (async () => {
+        try {
+          state.rejectLogs = await db.getRecentRejectLogs(20);
+        } catch (e) {}
+        if (state.lastEmit) {
+          computeKimp();
+          state.lastEmit.logs = getFilteredLogsForDashboard();
+          state.lastEmit.scalpState = state.scalpState;
+          state.lastEmit.wsLagMs = state.wsLagMs;
+          state.lastEmit.assets = state.assets;
+          const a = state.assets;
+          const tb = Math.floor(Number(a?.totalBuyKrwForCoins ?? a?.totalBuyKrw ?? 0));
+          const teCoins = Math.floor(Number(a?.evaluationKrwForCoins ?? 0));
+          const profitPctNum = getProfitPct(a);
+          state.lastEmit.profitSummary = { totalEval: teCoins, totalBuyKrw: tb, profitKrw: teCoins - tb, profitPct: tb > 0 ? profitPctNum : 0 };
+          state.lastEmit.prices = state.prices;
+          state.lastEmit.fng = state.fng;
+          state.lastEmit.trades = state.trades;
+          state.lastEmit.rejectLogs = state.rejectLogs;
+          state.lastEmit.marketContext = state.marketContext;
+          state.lastEmit.botEnabled = state.botEnabled;
+          state.lastEmit.raceHorseActive = state.raceHorseActive;
+          state.lastEmit.fxUsdKrw = state.fxUsdKrw;
+          state.lastEmit.kimpAvg = state.kimpAvg;
+          state.lastEmit.kimpByMarket = state.kimpByMarket;
+          if (state.strategySummary) {
+            state.strategySummary.strategyName = state.raceHorseActive ? 'RaceHorse' : (state.strategySummary.aggressive_mode ? 'Aggressive' : (state.strategySummary.race_horse_scheduler_enabled ? 'RaceHorse(예약)' : 'SCALP 기본'));
+          }
+          state.lastEmit.strategySummary = state.strategySummary;
+          state.lastEmit.modeRemaining = getModeRemainingOpts();
+          state.lastEmit.independentScalpStatus = scalpRunner.getStatus();
+          io.emit('dashboard', state.lastEmit);
+        }
+      })();
+    },
+    runCleanup: runDbCleanup,
+    run4AmCheck: () => {
+      const now = new Date();
+      const kstHour = (now.getUTCHours() + 9) % 24;
+      const today = now.toISOString().slice(0, 10);
+      if (kstHour === CLEANUP_HOUR_4AM && lastCleanupDate !== today) {
+        lastCleanupDate = today;
+        performSystemCleanup().catch((e) => console.warn('[Cleanup] 스케줄 실행 오류:', e?.message));
+      }
+    },
+    emitDashboard: () => emitDashboard(),
+    onPollError: (err) => console.error('poll error:', err?.message)
+  };
+}
+
+// 거절 로그 4시간 단위 삭제: Logger 모듈에서 스케줄 (단일 책임)
+tradeLogger.scheduleRejectLogCleanup(db, CLEANUP_INTERVAL_MS, configDefault.REJECT_LOG_CUTOFF_HOURS);
+tradeLogger.scheduleMemoryCleanup(CLEANUP_INTERVAL_MS);
 
 /**
- * 시스템 최적화: tmp/ 삭제, 오래된 로그·거래이력·임시 라벨 정리. 매일 4시 실행.
+ * 시스템 최적화: tmp/ 삭제, 오래된 로그·거래이력·임시 라벨 정리. 매일 4시 실행 (TradingEngine run4AmCheck).
  * @returns {Promise<{ freedBytes: number }>}
  */
 async function performSystemCleanup() {
+  EngineStateStore.update({ geminiEnabled: true });
   let freedBytes = 0;
   try {
     if (fs.existsSync(TMP_DIR) && fs.statSync(TMP_DIR).isDirectory()) {
@@ -1501,60 +1564,6 @@ async function performSystemCleanup() {
   }
   return { freedBytes };
 }
-
-// 매일 새벽 4시(KST) performSystemCleanup 실행
-let lastCleanupDate = null;
-setInterval(() => {
-  const now = new Date();
-  const kstHour = (now.getUTCHours() + 9) % 24;
-  const today = now.toISOString().slice(0, 10);
-  if (kstHour === CLEANUP_HOUR_4AM && lastCleanupDate !== today) {
-    lastCleanupDate = today;
-    performSystemCleanup().catch((e) => console.warn('[Cleanup] 스케줄 실행 오류:', e?.message));
-  }
-}, 60 * 1000);
-
-setInterval(() => {
-  (async () => {
-    try {
-      state.rejectLogs = await db.getRecentRejectLogs(20);
-    } catch (e) {}
-    if (state.lastEmit) {
-      computeKimp();
-      state.lastEmit.logs = getFilteredLogsForDashboard();
-      state.lastEmit.scalpState = state.scalpState;
-      state.lastEmit.wsLagMs = state.wsLagMs;
-      state.lastEmit.assets = state.assets;
-      const a = state.assets;
-      const tb = Math.floor(Number(a?.totalBuyKrwForCoins ?? a?.totalBuyKrw ?? 0));
-      const teCoins = Math.floor(Number(a?.evaluationKrwForCoins ?? 0));
-      const profitPctNum = getProfitPct(a);
-      state.lastEmit.profitSummary = {
-        totalEval: teCoins,
-        totalBuyKrw: tb,
-        profitKrw: teCoins - tb,
-        profitPct: tb > 0 ? profitPctNum : 0
-      };
-      state.lastEmit.prices = state.prices;
-      state.lastEmit.fng = state.fng;
-      state.lastEmit.trades = state.trades;
-      state.lastEmit.rejectLogs = state.rejectLogs;
-      state.lastEmit.marketContext = state.marketContext;
-      state.lastEmit.botEnabled = state.botEnabled;
-      state.lastEmit.raceHorseActive = state.raceHorseActive;
-      state.lastEmit.fxUsdKrw = state.fxUsdKrw;
-      state.lastEmit.kimpAvg = state.kimpAvg;
-      state.lastEmit.kimpByMarket = state.kimpByMarket;
-      if (state.strategySummary) {
-        state.strategySummary.strategyName = state.raceHorseActive ? 'RaceHorse' : (state.strategySummary.aggressive_mode ? 'Aggressive' : (state.strategySummary.race_horse_scheduler_enabled ? 'RaceHorse(예약)' : 'SCALP 기본'));
-      }
-      state.lastEmit.strategySummary = state.strategySummary;
-      state.lastEmit.modeRemaining = getModeRemainingOpts();
-      state.lastEmit.independentScalpStatus = scalpRunner.getStatus();
-      io.emit('dashboard', state.lastEmit);
-    }
-  })();
-}, 1000);
 
 io.on('connection', (socket) => {
   emitDashboard().catch((e) => console.error('emitDashboard:', e.message));
@@ -1860,6 +1869,10 @@ const initPromise = (async () => {
       if (!apiKeys.accessKey || !apiKeys.secretKey) {
         return { success: false, message: 'API 키가 설정되지 않았습니다.' };
       }
+      if (!tradingEngine.isRunning()) {
+        tradingEngine.start(getTradingEngineCallbacks());
+      }
+      EngineStateStore.update({ serviceStopped: false });
       try {
         await withUpbitFailover(async () => {
           const k = getActiveUpbitKeys();
@@ -1886,7 +1899,7 @@ const initPromise = (async () => {
       }
     },
     engineStop: async () => {
-      state.botEnabled = false;
+      tradingEngine.stop();
       if (apiKeys.accessKey && apiKeys.secretKey) {
         try {
           await withUpbitFailover(async () => {
@@ -1990,12 +2003,20 @@ const initPromise = (async () => {
       const profitPctNum = getProfitPct(assets);
       const totalEval = assets?.totalEvaluationKrw ?? 0;
       try {
-        const gemini = require('./lib/gemini');
-        const riskLine = await gemini.askGeminiForPortfolioRisk(profitPctNum, totalEval);
-        const geminiValue = riskLine
-          ? `현재 수익률: ${profitPctNum.toFixed(2)}% | ⚡ Gemini 분석: ${riskLine}`
-          : `현재 수익률: ${profitPctNum.toFixed(2)}%`;
-        embed.addFields({ name: '⚡ 실시간 요약', value: geminiValue, inline: false });
+        if (!state.geminiEnabled) {
+          embed.addFields({
+            name: '⚡ 실시간 요약',
+            value: `현재 수익률: ${profitPctNum.toFixed(2)}% | ⚡ AI 일시 중지 (기본 매매 모드)`,
+            inline: false
+          });
+        } else {
+          const gemini = require('./lib/gemini');
+          const riskLine = await gemini.askGeminiForPortfolioRisk(profitPctNum, totalEval);
+          const geminiValue = riskLine
+            ? `현재 수익률: ${profitPctNum.toFixed(2)}% | ⚡ Gemini 분석: ${riskLine}`
+            : `현재 수익률: ${profitPctNum.toFixed(2)}%`;
+          embed.addFields({ name: '⚡ 실시간 요약', value: geminiValue, inline: false });
+        }
       } catch (_) {
         embed.addFields({
           name: '⚡ 실시간 요약',
@@ -2172,9 +2193,10 @@ const initPromise = (async () => {
           } catch (_) {}
           dataItems.push({ symbol, price, rsi, strength, trend5m });
         }
-        const gemini = require('./lib/gemini');
-        const report = await gemini.askGeminiForScalpPoint(dataItems);
-        const text = report || '현재 AI 분석이 지연되고 있습니다. 잠시 후 시도해 주세요.';
+        const report = state.geminiEnabled
+          ? await (require('./lib/gemini').askGeminiForScalpPoint(dataItems))
+          : null;
+        const text = report || (state.geminiEnabled ? '현재 AI 분석이 지연되고 있습니다. 잠시 후 시도해 주세요.' : 'AI 기능이 일시 중지되었습니다. (기본 매매 모드)');
         const recommendedTicker = extractRecommendedTicker(text);
         const tickerForConfirm =
           recommendedTicker && ALLOWED_AGGRESSIVE_TICKERS.includes(recommendedTicker) ? recommendedTicker : null;
@@ -2387,11 +2409,13 @@ const initPromise = (async () => {
         }
 
         let geminiText = null;
-        try {
-          const gemini = require('./lib/gemini');
-          geminiText = await gemini.askGeminiForScanVol(enriched);
-        } catch (e) {
-          geminiText = '연동 실패: ' + (e?.message || 'API 키 확인');
+        if (state.geminiEnabled) {
+          try {
+            const gemini = require('./lib/gemini');
+            geminiText = await gemini.askGeminiForScanVol(enriched);
+          } catch (e) {
+            geminiText = '연동 실패: ' + (e?.message || 'API 키 확인');
+          }
         }
 
         const dataLines = enriched
@@ -2445,11 +2469,13 @@ const initPromise = (async () => {
         const kimpStr = state.kimpAvg != null ? `김치 프리미엄(평균): ${state.kimpAvg.toFixed(2)}%` : '김프: —';
         const ctx = { fng: fngStr, btcTrend, topTickers: topTickersLines || '—', kimp: kimpStr };
         let summaryText = null;
-        try {
-          const gemini = require('./lib/gemini');
-          summaryText = await gemini.askGeminiForMarketSummary(ctx);
-        } catch (e) {
-          summaryText = '시황 요약 생성 실패: ' + (e?.message || 'API 확인');
+        if (state.geminiEnabled) {
+          try {
+            const gemini = require('./lib/gemini');
+            summaryText = await gemini.askGeminiForMarketSummary(ctx);
+          } catch (e) {
+            summaryText = '시황 요약 생성 실패: ' + (e?.message || 'API 확인');
+          }
         }
         return new MessageEmbed()
           .setTitle('💡 시황 요약')
@@ -2597,6 +2623,9 @@ const initPromise = (async () => {
           if (trades?.length) dbContext += '최근 거래(최대 5건): ' + JSON.stringify(trades.slice(0, 5).map((t) => ({ ticker: t.ticker, side: t.side, reason: t.reason, net_return: t.net_return }))) + '\n';
           if (rejects?.length) dbContext += '최근 거절(최대 10건): ' + JSON.stringify(rejects.slice(0, 10).map((r) => ({ ticker: r.ticker, reason: r.reason }))) + '\n';
         } catch (_) {}
+        if (!state.geminiEnabled) {
+          return { content: 'AI 기능이 일시 중지되었습니다. (예산 초과 등으로 구글 결제 차단 시 기본 모드로 전환됩니다.)' };
+        }
         const gemini = require('./lib/gemini');
         const analysis = await gemini.askGeminiForLogAnalysis(logText, dbContext || undefined);
         return { content: analysis || '분석 결과를 생성하지 못했습니다.' };
@@ -2612,6 +2641,9 @@ const initPromise = (async () => {
         const tradesText = trades.length
           ? trades.map((t) => JSON.stringify({ ticker: t.ticker, side: t.side, timestamp: t.timestamp, price: t.price, quantity: t.quantity, net_return: t.net_return, reason: t.reason, rsi: t.rsi, trend_score: t.trend_score })).join('\n')
           : '최근 거래 이력이 없습니다. 매수/매도가 발생하면 여기에 기록됩니다.';
+        if (!state.geminiEnabled) {
+          return { content: 'AI 기능이 일시 중지되었습니다. (예산 초과로 구글 결제 차단 시 기본 매매 모드로 전환됩니다.)' };
+        }
         const gemini = require('./lib/gemini');
         const { analysis, lesson } = await gemini.askGeminiForAdvisorAdvice(tradesText, memoryText || undefined);
         if (lesson) tradeHistoryLogger.appendStrategyMemory(lesson);
@@ -2781,6 +2813,27 @@ const initPromise = (async () => {
             if (discordBot.sendToChannel) discordBot.sendToChannel('⚠️ API 요청 제한으로 재시도 중').catch(() => {});
           });
         }
+        if (typeof upbit.setEmergencyPauseCallback === 'function') {
+          upbit.setEmergencyPauseCallback((pauseMs) => {
+            const ms = pauseMs || 60000;
+            state.emergencyPauseUntil = Date.now() + ms;
+            if (discordBot.sendToChannel) {
+              discordBot.sendToChannel(`⚠️ 업비트 429 발생 — ${ms / 1000}초간 API 일시 중단 (Emergency Pause)`).catch(() => {});
+            }
+          });
+        }
+        if (typeof geminiModule.setOnBillingDisabledCallback === 'function') {
+          geminiModule.setOnBillingDisabledCallback(() => {
+            EngineStateStore.update({ geminiEnabled: false });
+            const msg = '⚠️ 예산 초과로 구글 결제가 차단되었습니다. AI 기능을 정지하고 기본 매매 모드로 전환합니다.';
+            if (discordBot.sendDmToAdmin) {
+              discordBot.sendDmToAdmin(msg).catch(() => {});
+            }
+            if (discordBot.sendToChannel) {
+              discordBot.sendToChannel(msg).catch(() => {});
+            }
+          });
+        }
         if (startupPromise && typeof startupPromise.then === 'function') {
           await startupPromise;
           console.log('[MyScalpBot] 재가동 패널 전송 순서 완료 (역할 A → B → C → [📊 현재 상태]). 메시지 순서: MarketSearchEngine(별도 프로세스) → 역할 A → B → C.');
@@ -2802,6 +2855,10 @@ const initPromise = (async () => {
     console.log('SQLite trades.db:', path.join(__dirname, 'trades.db'));
     if (MEME_PAGE_ONLY) console.log('MEME_PAGE_ONLY=1: /meme 전용 모드');
     if (ORCH_PAGE_ONLY) console.log('ORCH_PAGE_ONLY=1: /orchestrator 전용 모드');
+    tradingEngine.start(getTradingEngineCallbacks());
+    const cbs = getTradingEngineCallbacks();
+    setTimeout(() => cbs.runMarketAnalyzerMedium().catch(() => {}), 3000);
+    setTimeout(() => cbs.runMarketAnalyzerDaily().catch(() => {}), 15000);
     memeEngine.start(async (symbol) => {
       const t = state.prices['KRW-' + symbol];
       return t?.trade_price ?? 0;
@@ -2825,6 +2882,8 @@ if (require.main !== module) {
   module.exports = {
     initPromise,
     state,
+    EngineStateStore,
+    tradingEngine,
     app,
     io,
     server,

@@ -37,7 +37,7 @@ module.exports = {
       max_restarts: 50,
       min_uptime: '10s',
       restart_delay: 3000,
-      exp_backoff_restart_delay: 10000,
+      exp_backoff_restart_delay: 10000, // 크래시 시 10초 이상 지연 재시작 (즉시 재시작 방지)
       env: { NODE_ENV: 'production' },
       error_file: path.join(root, 'logs', 'pm2-upbit-bot-error.log'),
       out_file: path.join(root, 'logs', 'pm2-upbit-bot-out.log'),
@@ -51,7 +51,7 @@ module.exports = {
       autorestart: true,
       max_restarts: 10,
       restart_delay: 3000,
-      exp_backoff_restart_delay: 10000,
+      exp_backoff_restart_delay: 10000, // 크래시 시 10초 이상 지연 재시작
       env: { NODE_ENV: 'production' },
       error_file: path.join(root, 'logs', 'pm2-MarketSearchEngine-error.log'),
       out_file: path.join(root, 'logs', 'pm2-MarketSearchEngine-out.log'),
