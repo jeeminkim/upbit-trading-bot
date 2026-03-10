@@ -74,6 +74,18 @@ const systemStatePersistence = require('./lib/systemStatePersistence');
 const tradeHistoryLogger = require('./lib/tradeHistoryLogger');
 const EngineStateStore = require('./domain/state/EngineStateStore');
 const TradingEngine = require('./domain/trading/TradingEngine');
+const USE_SIGNAL_ENGINE = process.env.USE_SIGNAL_ENGINE === '1';
+let signalEngineFromBootstrap = null;
+if (USE_SIGNAL_ENGINE) {
+  try {
+    const { bootstrap } = require('./src/composition/bootstrap');
+    const composed = bootstrap();
+    signalEngineFromBootstrap = composed.signalEngine;
+    console.log('[Arch] SignalEngine (ScalpStrategy) 로드됨 — USE_SIGNAL_ENGINE=1');
+  } catch (e) {
+    console.warn('[Arch] bootstrap SignalEngine 로드 실패:', e?.message);
+  }
+}
 const geminiResolvedPath = require.resolve('./lib/gemini');
 const geminiModule = require('./lib/gemini');
 console.log('[Gemini] server.js가 로드한 gemini 모듈 절대경로:', geminiResolvedPath);
@@ -931,6 +943,27 @@ async function runScalpCycle() {
     const nextScalpState = {};
     state.lastSnapshots = state.lastSnapshots || {};
 
+    let signalEngineResult = null;
+    if (USE_SIGNAL_ENGINE && signalEngineFromBootstrap) {
+      const contextByMarket = {};
+      for (const m of SCALP_MARKETS) {
+        const ticker = tickerMap[m];
+        const snap = buildSnapshotFromOrderbook(obMap[m], ticker, m);
+        if (snap) state.lastSnapshots[m] = snap;
+        const cp = state.prices[m]?.tradePrice ?? ticker?.trade_price;
+        if (cp != null) pushPrice(m, cp);
+        contextByMarket[m] = {
+          legacySnapshot: snap,
+          prevHigh: getPrevHigh(m),
+          currentPrice: cp,
+          market: m,
+          marketContext: profile.greedy_mode ? state.marketContext : null,
+          availableKrw: state.assets?.orderableKrw ?? null
+        };
+      }
+      signalEngineResult = signalEngineFromBootstrap.evaluateFromLegacy(contextByMarket);
+    }
+
     for (const market of SCALP_MARKETS) {
       // 종목별 독립: RSI·볼린저·strength·OBI·entry pipeline 계산
       const sym = market.replace(/^KRW-/, '');
@@ -938,7 +971,9 @@ async function runScalpCycle() {
       const mpiMultiplier = scalpEngine.getMpiPositionMultiplier(mpiScore);
 
       const ticker = tickerMap[market];
-      const snapshot = buildSnapshotFromOrderbook(obMap[market], ticker, market);
+      const snapshot = (USE_SIGNAL_ENGINE && signalEngineResult && state.lastSnapshots[market])
+        ? state.lastSnapshots[market]
+        : buildSnapshotFromOrderbook(obMap[market], ticker, market);
       if (snapshot) state.lastSnapshots[market] = snapshot;
       const currentPrice = state.prices[market]?.tradePrice ?? ticker?.trade_price;
       if (currentPrice != null) pushPrice(market, currentPrice);
@@ -961,7 +996,21 @@ async function runScalpCycle() {
 
       const marketContext = profile.greedy_mode ? state.marketContext : null;
       const orderableKrw = state.assets && state.assets.orderableKrw != null ? state.assets.orderableKrw : null;
-      const pipeline = scalpEngine.runEntryPipeline(snapshot, prevHigh, currentPrice, market, marketContext, orderableKrw);
+      let pipeline;
+      if (signalEngineResult && signalEngineResult.byMarket[market]) {
+        const res = signalEngineResult.byMarket[market];
+        pipeline = {
+          score: res.decision.score,
+          p0Allowed: res.legacy.p0Allowed,
+          p0Reason: res.legacy.p0Reason,
+          priceBreak: res.legacy.priceBreak,
+          volSurge: res.legacy.volSurge,
+          marketScore: res.legacy.marketScore,
+          quantityMultiplier: res.legacy.quantityMultiplier
+        };
+      } else {
+        pipeline = scalpEngine.runEntryPipeline(snapshot, prevHigh, currentPrice, market, marketContext, orderableKrw);
+      }
       const strength = snapshot.strength_proxy_60s != null ? snapshot.strength_proxy_60s : 0.5;
       const effectiveStrengthThreshold = scalpEngine.getEffectiveStrengthThreshold ? scalpEngine.getEffectiveStrengthThreshold(profile, market) : profile.strength_threshold;
       const strengthOk = strength >= (effectiveStrengthThreshold ?? profile.strength_threshold);
