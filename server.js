@@ -550,7 +550,15 @@ EngineStateStore.init({
   lastResumeLogAt: null,
   lastRecoveryFetchAt: null,
   geminiEnabled: true,
-  scalpMode: false
+  scalpMode: false,
+  cashLock: {
+    active: false,
+    reason: null,
+    orderableKrw: null,
+    requiredKrw: 5000,
+    since: null,
+    notifiedAt: null
+  }
 });
 if (executionEngineFromBootstrap) executionEngineFromBootstrap.stateStore = EngineStateStore;
 if (positionEngineFromBootstrap) positionEngineFromBootstrap.stateStore = EngineStateStore;
@@ -638,7 +646,7 @@ function formatRemainingHMS(remainingMs) {
 }
 
 function getCurrentSystemState() {
-  const st = scalpRunner.getStatus();
+  const st = scalpRunner.getStatus(state);
   const scalpRemaining = st?.remainingMs ?? 0;
   const aggressiveList = scalpEngine.getAggressiveSymbols();
   const ai_weight = aggressiveList.map((ticker) => ({
@@ -668,7 +676,7 @@ EngineStateStore.setPersistCallback(getCurrentSystemState);
 
 /** buildCurrentStateEmbed opts에 넣을 모드별 남은 시간 */
 function getModeRemainingOpts() {
-  const st = scalpRunner.getStatus();
+  const st = scalpRunner.getStatus(state);
   const aggressiveList = scalpEngine.getAggressiveSymbols();
   return {
     scalpRemainingMs: st?.remainingMs ?? 0,
@@ -684,23 +692,13 @@ function getModeRemainingOpts() {
 function restoreSystemState() {
   const loaded = EngineStateStore.loadPersisted();
   const now = Date.now();
+  // 재기동 후 자동 진입 금지: scalp_mode는 endTime만 참고 복원하고, isRunning은 켜지 않음 (paused_after_restart)
   if (loaded.scalp_mode.active && loaded.scalp_mode.endTime != null && loaded.scalp_mode.endTime > now) {
     scalpState.restoreFromPersistence(loaded.scalp_mode.endTime);
-    EngineStateStore.update({ scalpMode: scalpState.isRunning });
-    console.log('[Boot] system_state: 초단타 스캘프 모드 복구됨 (만료:', new Date(loaded.scalp_mode.endTime).toISOString(), ')');
+    EngineStateStore.update({ scalpMode: false });
+    console.log('[Boot] system_state: 초단타 스캘프 모드 복구됨 (일시정지, 수동 시작 필요. 만료 참고:', new Date(loaded.scalp_mode.endTime).toISOString(), ')');
   }
-  (loaded.ai_weight || []).forEach(({ ticker, endTime }) => {
-    if (endTime != null && endTime > now) {
-      const ttlMs = endTime - now;
-      scalpEngine.setAggressiveSymbol(ticker, ttlMs);
-      console.log('[Boot] system_state: AI 가중치 복구', ticker, '(만료:', new Date(endTime).toISOString(), ')');
-    }
-  });
-  if (loaded.soft_criteria.active && loaded.soft_criteria.endTime != null && loaded.soft_criteria.endTime > now) {
-    const ttlMs = loaded.soft_criteria.endTime - now;
-    StrategyManager.setRelaxedMode(ttlMs);
-    console.log('[Boot] system_state: 기준 완화 복구됨 (만료:', new Date(loaded.soft_criteria.endTime).toISOString(), ')');
-  }
+  // 시간제 모드(경주마/AI가중치/기준완화)는 재기동 후 자동 ON 복원 금지 — 남은 시간은 persist에만 남기고 활성화하지 않음
   if (loaded.gemini_enabled === false) {
     EngineStateStore.update({ geminiEnabled: false });
     console.log('[Boot] system_state: Gemini AI 비활성 상태 복구됨 (결제 차단 등)');
@@ -906,11 +904,57 @@ function buildSnapshotFromOrderbook(orderbookItem, ticker, market) {
 }
 
 const MIN_ORDER_KRW = configDefault.MIN_ORDER_KRW != null ? configDefault.MIN_ORDER_KRW : 5000;
+/** 전 엔진 공통: 이 금액 미만이면 신규 매수 전부 중단 (매도/청산은 허용) */
+const GLOBAL_MIN_BUYABLE_KRW = 5000;
 
 /** 경주마 스케줄 반영 + state 동기화 (StrategyManager 단일 소스) */
 function updateRaceHorseState() {
   StrategyManager.updateRaceHorseFromSchedule();
   state.raceHorseActive = StrategyManager.isRaceHorseActive();
+}
+
+/**
+ * 전 엔진 공통 현금 부족 락: orderableKrw < GLOBAL_MIN_BUYABLE_KRW 이면 신규 매수 전부 중단.
+ * 활성/해제 시 각 1회만 로그·Discord 알림 (spam 방지).
+ * cash lock은 persist 하지 않음 — 재기동 후 첫 자산 조회로 다시 계산.
+ */
+function updateCashLock(orderableKrw) {
+  const krw = typeof orderableKrw === 'number' && Number.isFinite(orderableKrw) ? orderableKrw : 0;
+  const lock = state.cashLock || {};
+  const wasActive = lock.active === true;
+
+  if (krw < GLOBAL_MIN_BUYABLE_KRW) {
+    if (!wasActive) {
+      state.cashLock = {
+        active: true,
+        reason: 'insufficient_krw',
+        orderableKrw: krw,
+        requiredKrw: GLOBAL_MIN_BUYABLE_KRW,
+        since: Date.now(),
+        notifiedAt: null
+      };
+      const msg = `남은 현금이 부족합니다. 충분한 현금이 매도를 통해 확보될 때까지 신규 매수 시도를 중단합니다. (주문가능 KRW: ${Math.floor(krw).toLocaleString('ko-KR')} / 필요 최소: ${GLOBAL_MIN_BUYABLE_KRW})`;
+      tradeLogger.logTag('CashLock', msg, { orderableKrw: krw, requiredKrw: GLOBAL_MIN_BUYABLE_KRW });
+      if (discordBot.sendToChannel) discordBot.sendToChannel('⚠️ ' + msg).catch(() => {});
+      state.cashLock.notifiedAt = Date.now();
+    } else {
+      state.cashLock.orderableKrw = krw;
+    }
+  } else {
+    if (wasActive) {
+      const msg = `현금이 확보되어 신규 매수 잠금을 해제했습니다. (주문가능 KRW: ${Math.floor(krw).toLocaleString('ko-KR')})`;
+      tradeLogger.logTag('CashLock', msg, { orderableKrw: krw });
+      if (discordBot.sendToChannel) discordBot.sendToChannel('✅ ' + msg).catch(() => {});
+    }
+    state.cashLock = {
+      active: false,
+      reason: null,
+      orderableKrw: krw,
+      requiredKrw: GLOBAL_MIN_BUYABLE_KRW,
+      since: null,
+      notifiedAt: null
+    };
+  }
 }
 
 /** MPI 점수로 수량 배율 반환. 주문 시 최종 수량 = 기본 수량 * 이 배율 */
@@ -1122,15 +1166,20 @@ async function runScalpCycle() {
  * (독립 스캘프 봇이 해당 마켓을 보유 중이면 해당 마켓은 scalpRunner가 담당하므로 스킵)
  */
 async function runExitPipeline() {
-  if (!state.botEnabled || !apiKeys.accessKey || !apiKeys.secretKey) return;
+  if (!apiKeys.accessKey || !apiKeys.secretKey) return;
+  // 진입 엔진이 꺼져 있어도 기존 포지션 청산은 허용 (스캘프 포지션 또는 메인 잔고)
+  if (!state.botEnabled && !scalpRunner.getStatus?.()?.activePosition) return;
   const accounts = state.accounts || [];
   const snapshots = state.lastSnapshots || {};
-  const scalpState = state.scalpState || {};
-  const posByScalp = scalpRunner.getStatus?.()?.activePosition;
+  const pipelineScalpState = state.scalpState || {};
+  const runnerStatus = scalpRunner.getStatus?.();
+  const posByScalp = runnerStatus?.activePosition;
   const scalpMarket = posByScalp?.market;
+  // 독립 스캘프가 해당 마켓을 보유·가동 중일 때만 메인 exit 스킵 (스캘프 tickExit가 담당). paused/정지 시 메인도 청산 가능
+  const scalpRunningForMarket = !!(runnerStatus?.isRunning && scalpMarket);
 
   for (const market of SCALP_MARKETS) {
-    if (scalpState.isRunning && scalpMarket === market) continue;
+    if (scalpRunningForMarket && scalpMarket === market) continue;
     const currency = market.replace(/^KRW-/, '');
     const acc = accounts.find((a) => (a.currency || '').toUpperCase() === currency.toUpperCase());
     if (!acc) continue;
@@ -1148,7 +1197,7 @@ async function runExitPipeline() {
       highSinceEntry: currentPrice,
       strengthPeak60s: snapshot.strength_proxy_60s ?? snapshot.strength_peak_60s
     };
-    const currentEntryScore = scalpState[market]?.entryScore ?? null;
+    const currentEntryScore = pipelineScalpState[market]?.entryScore ?? null;
     const { exit, reason } = ExitPolicy.evaluate(position, snapshot, currentPrice, currentEntryScore);
     if (!exit) continue;
     const volume = Math.floor(balance * 1e8) / 1e8;
@@ -1352,7 +1401,8 @@ async function emitDashboard() {
     kimpAvg: state.kimpAvg,
     kimpByMarket: state.kimpByMarket,
     raceHorseActive: state.raceHorseActive,
-    independentScalpStatus: scalpRunner.getStatus()
+    independentScalpStatus: scalpRunner.getStatus(state),
+    cashLock: state.cashLock
   };
   io.emit('dashboard', state.lastEmit);
   if (discordBot.updateStatusMessage) {
@@ -1447,6 +1497,7 @@ async function runOneTick() {
   } else {
     state.accounts = state.accounts || [];
   }
+  updateCashLock(state.assets?.orderableKrw ?? 0);
   state.fng = await fetchFng();
   state.trades = await db.getRecentTrades(10);
   computeKimp();
@@ -1497,7 +1548,9 @@ async function runOneTick() {
   } catch (e) { /* non-fatal */ }
 
   if (state.botEnabled && orchResult.action === 'ENTER' && orchResult.signal && apiKeys.accessKey && apiKeys.secretKey) {
-    if (scalpState.priorityOwner === 'SCALP') {
+    if (state.cashLock?.active) {
+      tradeLogger.logTag('거절', 'Cash lock: 신규 매수 중단', { orderableKrw: state.cashLock.orderableKrw, requiredKrw: state.cashLock.requiredKrw });
+    } else if (scalpState.priorityOwner === 'SCALP') {
       // 독립 스캘프 봇 가동 중: 메인 오케스트레이터 진입 차단 (우선권 탈취)
     } else {
       const market = 'KRW-' + orchResult.signal.symbol;
@@ -1627,19 +1680,28 @@ async function runOneTick() {
     }
   }
 
+  // 청산은 항상 허용: 스캘프 포지션이 있으면 엔진 on/off 무관하게 tickExit 호출 (어느 봇이 매수했든 매도 가능)
+  const scalpCtx = {
+    upbit,
+    state,
+    apiKeys,
+    TradeExecutor,
+    recordTrade,
+    emitDashboard,
+    sendAlert: (msg) => { if (discordBot.sendToChannel) discordBot.sendToChannel(msg).catch(() => {}); },
+    lastEntryBySymbol: (typeof orchestrator.getLastEntryBySymbol === 'function' ? orchestrator.getLastEntryBySymbol() : {}),
+    recordEntryForCooldown: (symbol) => { if (symbol && typeof orchestrator.recordEntry === 'function') orchestrator.recordEntry(symbol, 'SCALP'); }
+  };
+  if (scalpState.activePosition) {
+    try {
+      await scalpRunner.tickExit(scalpCtx);
+    } catch (e) {
+      console.warn('scalpRunner.tickExit:', e?.message);
+    }
+  }
   if (state.scalpMode && scalpState.isRunning) {
     try {
-      await scalpRunner.tick({
-        upbit,
-        state,
-        apiKeys,
-        TradeExecutor,
-        recordTrade,
-        emitDashboard,
-        sendAlert: (msg) => { if (discordBot.sendToChannel) discordBot.sendToChannel(msg).catch(() => {}); },
-        lastEntryBySymbol: (typeof orchestrator.getLastEntryBySymbol === 'function' ? orchestrator.getLastEntryBySymbol() : {}),
-        recordEntryForCooldown: (symbol) => { if (symbol && typeof orchestrator.recordEntry === 'function') orchestrator.recordEntry(symbol, 'SCALP'); }
-      });
+      await scalpRunner.tick(scalpCtx);
       if (!scalpState.isRunning) EngineStateStore.update({ scalpMode: false });
     } catch (e) {
       console.warn('scalpRunner.tick:', e?.message);
@@ -1707,7 +1769,8 @@ function getTradingEngineCallbacks() {
           }
           state.lastEmit.strategySummary = state.strategySummary;
           state.lastEmit.modeRemaining = getModeRemainingOpts();
-          state.lastEmit.independentScalpStatus = scalpRunner.getStatus();
+          state.lastEmit.independentScalpStatus = scalpRunner.getStatus(state);
+          state.lastEmit.cashLock = state.cashLock;
           io.emit('dashboard', state.lastEmit);
         }
       })();
@@ -1905,6 +1968,12 @@ io.on('connection', (socket) => {
     if (!ApiAccessPolicy.canPlaceOrder(state)) {
       emitManualLog('error', 'PAUSE/RECOVERY 중에는 주문할 수 없습니다.');
       if (typeof cb === 'function') cb({ success: false, message: 'PAUSE/RECOVERY 중에는 주문할 수 없습니다.' });
+      return;
+    }
+    if (state.cashLock?.active) {
+      const msg = `현금 부족으로 신규 매수가 잠겨 있습니다. (주문가능: ${Math.floor(state.cashLock.orderableKrw ?? 0).toLocaleString('ko-KR')}원 / 필요 최소: ${state.cashLock.requiredKrw}원)`;
+      emitManualLog('error', msg);
+      if (typeof cb === 'function') cb({ success: false, message: msg });
       return;
     }
     emitManualLog('info', `${market} ${amountKrw.toLocaleString('ko-KR')}원 시장가 매수 요청 중…`);
@@ -2163,7 +2232,7 @@ const initPromise = (async () => {
       persistSystemState();
     },
     /** 독립 초단타 스캘프 봇 상태 (디스코드/대시보드용) */
-    getIndependentScalpStatus: () => scalpRunner.getStatus(),
+    getIndependentScalpStatus: () => scalpRunner.getStatus(state),
     /** 독립 스캘프 3시간 시한부 가동 (우선권 SCALP). 기준 완화 중이면 자동 종료 후 스캘프 우선 */
     setIndependentScalpActivate: (mode = 'SUPER_AGGRESSIVE') => {
       if (StrategyManager.getRelaxedModeRemainingMs() > 0) StrategyManager.setRelaxedMode(0);

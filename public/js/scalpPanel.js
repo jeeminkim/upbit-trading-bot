@@ -26,7 +26,10 @@
     var priorityEl = document.getElementById('scalp-priority');
     var riskHaltEl = document.getElementById('scalp-risk-halt');
 
-    if (statusEl) statusEl.textContent = status.isRunning ? (status.isRiskHalt ? 'RISK_HALT' : 'RUNNING') : 'STOPPED';
+    if (statusEl) {
+      if (status.isRunning) statusEl.textContent = status.isRiskHalt ? 'RISK_HALT' : 'RUNNING';
+      else statusEl.textContent = status.pausedAfterRestart ? 'PAUSED (복원됨)' : 'STOPPED';
+    }
     if (timerEl) timerEl.textContent = formatRemainingMs(Number(status.remainingMs));
     if (entriesEl) entriesEl.textContent = status.dailyEntries != null ? String(status.dailyEntries) : '0';
     if (pnlEl) {
