@@ -1,23 +1,23 @@
 /**
  * PositionEngine — 수익률 계산(PROFIT_CALC_SPEC 100% 준수), state.assets 연동, ExitPolicy(손절/익절 감시)
+ * 업비트 표준: 분모=총매수(코인만), 분자=평가금(코인만). 보유 KRW/전체자산 사용 금지.
  */
 
 const path = require('path');
 const TradeExecutor = require(path.join(__dirname, '../../../lib/TradeExecutor'));
+const { calculateNetProfitPct } = require(path.join(__dirname, '../../shared/utils/math'));
+const { UPBIT_FEE_RATE } = require(path.join(__dirname, '../../shared/constants'));
+const ExitPolicy = require(path.join(__dirname, 'ExitPolicy'));
 
 /**
- * PROFIT_CALC_SPEC.md: totalBuyKrwForCoins, evaluationKrwForCoins 사용, KRW 제외
- * @param {Object} assets - summarizeAccounts 결과 (totalBuyKrwForCoins, evaluationKrwForCoins, totalBuyKrw 등)
+ * PROFIT_CALC_SPEC: totalBuyKrwForCoins(분모), evaluationKrwForCoins(분자)만 사용. 수수료 0.05% 반영.
+ * @param {Object} assets - summarizeAccounts 결과 (totalBuyKrwForCoins, evaluationKrwForCoins)
  * @returns {{ totalBuyKrwForCoins: number, evaluationKrwForCoins: number, profitPct: number }}
  */
 function getProfitFromAssets(assets) {
-  const totalBuy = assets?.totalBuyKrwForCoins ?? assets?.totalBuyKrw ?? 0;
-  const evalCoins = assets?.evaluationKrwForCoins ?? 0;
-  if (totalBuy <= 0) {
-    return { totalBuyKrwForCoins: 0, evaluationKrwForCoins: evalCoins, profitPct: 0 };
-  }
-  const profitLoss = evalCoins - totalBuy;
-  const profitPct = (profitLoss / totalBuy) * 100;
+  const totalBuy = Number(assets?.totalBuyKrwForCoins ?? 0) || 0;
+  const evalCoins = Number(assets?.evaluationKrwForCoins ?? 0) || 0;
+  const profitPct = calculateNetProfitPct(totalBuy, evalCoins, UPBIT_FEE_RATE);
   return {
     totalBuyKrwForCoins: totalBuy,
     evaluationKrwForCoins: evalCoins,
@@ -35,7 +35,7 @@ function getProfitPct(assets) {
 }
 
 /**
- * 청산 신호 — 레거시 TradeExecutor.checkExit (scalpEngine.shouldExitScalp) 브리지
+ * 청산 신호 — domain ExitPolicy 사용 (내부는 LegacyExitBridge → TradeExecutor.checkExit)
  * @param {Object} position - { entryPrice, entryTimeMs, strengthPeak60s?, highSinceEntry? }
  * @param {Object} snapshot - 현재 호가·체결 스냅샷
  * @param {number} currentPrice
@@ -43,7 +43,7 @@ function getProfitPct(assets) {
  * @returns {{ exit: boolean, reason?: string }}
  */
 function getExitSignal(position, snapshot, currentPrice, currentEntryScore) {
-  return TradeExecutor.checkExit(position, snapshot, currentPrice, currentEntryScore);
+  return ExitPolicy.evaluate(position, snapshot, currentPrice, currentEntryScore);
 }
 
 /**

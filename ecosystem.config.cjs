@@ -15,7 +15,8 @@
  * (discord-operator, market-bot은 dist-refactor 빌드 필요)
  *
  * 사용법 (2개만):
- *   pm2 start ecosystem.config.cjs   또는 npm run start:all
+ *   npm run start:all     또는 npm run pm2:start  — upbit-bot + MarketSearchEngine (레거시 경로)
+ *   npm run pm2:start:engine — upbit-bot + MarketSearchEngine, upbit-bot만 Signal/Risk/Execution/Position 엔진 ON
  *   pm2 restart ecosystem.config.cjs 또는 npm run restart:all
  */
 const path = require('path');

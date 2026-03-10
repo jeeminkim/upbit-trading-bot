@@ -64,7 +64,12 @@ const similarityEngine = require('./lib/pattern/similarityEngine');
 const futuresSentiment = require('./lib/meme/futuresSentiment');
 const db = require('./lib/db');
 const configDefault = require('./config.default');
+const { UPBIT_FEE_RATE } = require(path.join(__dirname, 'src/shared/constants'));
 const TradeExecutor = require('./lib/TradeExecutor');
+const ExitPolicy = require(path.join(__dirname, 'src/domain/position/ExitPolicy'));
+const ApiAccessPolicy = require(path.join(__dirname, 'src/domain/state/ApiAccessPolicy'));
+const EngineMode = require(path.join(__dirname, 'src/domain/state/EngineMode'));
+const signalEvaluationLogger = require('./lib/signalEvaluationLogger');
 const discordBot = require('./lib/discordBot');
 const { MessageEmbed } = require('discord.js');
 const orchestrator = require('./lib/strategy/orchestrator');
@@ -172,8 +177,9 @@ function isUpbitAuthError(err) {
 }
 
 async function withUpbitFailover(fn) {
-  if (typeof state !== 'undefined' && state.emergencyPauseUntil != null && Date.now() < state.emergencyPauseUntil) {
-    throw new Error('Emergency pause: Upbit API 1분 일시 중단');
+  const mode = state ? ApiAccessPolicy.getMode(state) : EngineMode.NORMAL;
+  if (mode === EngineMode.EMERGENCY_PAUSE) {
+    return undefined;
   }
   try {
     return await fn();
@@ -537,7 +543,14 @@ EngineStateStore.init({
   lastOrchestratorResult: null,
   serviceStopped: false,
   emergencyPauseUntil: null,
-  geminiEnabled: true
+  emergencyPauseReason: null,
+  mode: EngineMode.NORMAL,
+  recoveryUntil: null,
+  lastPauseLogAt: null,
+  lastResumeLogAt: null,
+  lastRecoveryFetchAt: null,
+  geminiEnabled: true,
+  scalpMode: false
 });
 if (executionEngineFromBootstrap) executionEngineFromBootstrap.stateStore = EngineStateStore;
 if (positionEngineFromBootstrap) positionEngineFromBootstrap.stateStore = EngineStateStore;
@@ -577,18 +590,14 @@ async function fetchAssets() {
 }
 
 /**
- * 수익률(%) 업비트 실거래 화면과 동일: (평가손익 합계 / 총매수금액 합계) * 100
- * - 총매수금액: 보유 코인만 (평균단가*보유수량) 합계, KRW 제외
- * - 평가손익: 각 코인 (현재가-평균단가)*보유수량 합계 (코인만)
- * APENFT·PURSE·잡코인 제외. 총매수 0이면 0%.
+ * 수익률(%) 업비트 표준, 수수료 0.05% 반영. 보유 KRW 제외, 코인만.
+ * 공통: src/shared/utils/math.js calculateNetProfitPct 사용.
  */
 function getProfitPct(assets) {
   if (!assets) return 0;
-  const totalBuy = assets.totalBuyKrwForCoins ?? assets.totalBuyKrw ?? 0;
-  if (totalBuy <= 0) return 0;
-  const evalCoins = assets.evaluationKrwForCoins ?? 0;
-  const profitLoss = evalCoins - totalBuy;
-  return (profitLoss / totalBuy) * 100;
+  const totalBuy = Number(assets.totalBuyKrwForCoins ?? 0) || 0;
+  const totalEval = Number(assets.evaluationKrwForCoins ?? 0) || 0;
+  return require('./src/shared/utils/math').calculateNetProfitPct(totalBuy, totalEval, UPBIT_FEE_RATE);
 }
 
 /** AI 추천 대형주 승인 대상 티커 (대괄호 추출 후 이 목록에 있을 때만 승인 버튼 노출) */
@@ -676,6 +685,7 @@ function restoreSystemState() {
   const now = Date.now();
   if (loaded.scalp_mode.active && loaded.scalp_mode.endTime != null && loaded.scalp_mode.endTime > now) {
     scalpState.restoreFromPersistence(loaded.scalp_mode.endTime);
+    EngineStateStore.update({ scalpMode: scalpState.isRunning });
     console.log('[Boot] system_state: 초단타 스캘프 모드 복구됨 (만료:', new Date(loaded.scalp_mode.endTime).toISOString(), ')');
   }
   (loaded.ai_weight || []).forEach(({ ticker, endTime }) => {
@@ -713,11 +723,11 @@ function buildCurrentStateEmbed(assets, summary, opts) {
       ? opts.raceHorseStatusLabel
       : (opts?.isRaceHorseMode === true ? '🔥 활성' : '❄️ 비활성');
   const w = (summary && summary.weights) || {};
-  const totalBuyKrw = Math.floor(assets?.totalBuyKrwForCoins ?? assets?.totalBuyKrw ?? 0);
-  const totalEvalCoins = Math.floor(assets?.evaluationKrwForCoins ?? 0);
+  const totalBuyKrw = Math.floor(Number(assets?.totalBuyKrwForCoins ?? 0) || 0);
+  const totalEvalCoins = Math.floor(Number(assets?.evaluationKrwForCoins ?? 0) || 0);
   const orderableKrw = Math.floor(assets?.orderableKrw ?? 0);
   const profitLossKrw = totalEvalCoins - totalBuyKrw;
-  const profitPctNum = getProfitPct(assets);
+  const profitPctNum = positionEngineFromBootstrap ? positionEngineFromBootstrap.getProfitPct(assets) : getProfitPct(assets);
   const profitRateStr = (totalBuyKrw <= 0 ? 0 : Math.floor(profitPctNum * 100) / 100).toFixed(2) + '%';
   const emoji = profitPctNum > 0 ? '🟢 ' : profitPctNum < 0 ? '🔴 ' : '⚪ ';
   const profitPct = emoji + (profitPctNum >= 0 ? '+' : '') + profitRateStr;
@@ -1005,8 +1015,10 @@ async function runScalpCycle() {
       const marketContext = profile.greedy_mode ? state.marketContext : null;
       const orderableKrw = state.assets && state.assets.orderableKrw != null ? state.assets.orderableKrw : null;
       let pipeline;
+      let legacyScore = null;
       if (signalEngineResult && signalEngineResult.byMarket[market]) {
         const res = signalEngineResult.byMarket[market];
+        legacyScore = res.legacy != null && typeof res.legacy.score === 'number' ? res.legacy.score : null;
         pipeline = {
           score: res.decision.score,
           p0Allowed: res.legacy.p0Allowed,
@@ -1016,8 +1028,26 @@ async function runScalpCycle() {
           marketScore: res.legacy.marketScore,
           quantityMultiplier: res.legacy.quantityMultiplier
         };
+        signalEvaluationLogger.logSignalEvaluation({
+          market,
+          legacyScore: legacyScore ?? pipeline.score,
+          signalEngineScore: res.decision.score,
+          finalDecision: pipeline.p0Allowed ? 'ALLOWED' : 'BLOCKED',
+          blockReason: pipeline.p0Allowed ? null : [pipeline.p0Reason || 'p0'],
+          path: 'signal-engine',
+          ts: Date.now()
+        });
       } else {
         pipeline = scalpEngine.runEntryPipeline(snapshot, prevHigh, currentPrice, market, marketContext, orderableKrw);
+        signalEvaluationLogger.logSignalEvaluation({
+          market,
+          legacyScore: pipeline.score,
+          signalEngineScore: null,
+          finalDecision: pipeline.p0Allowed ? 'ALLOWED' : 'BLOCKED',
+          blockReason: pipeline.p0Allowed ? null : [pipeline.p0Reason || 'p0'],
+          path: 'legacy',
+          ts: Date.now()
+        });
       }
       const strength = snapshot.strength_proxy_60s != null ? snapshot.strength_proxy_60s : 0.5;
       const effectiveStrengthThreshold = scalpEngine.getEffectiveStrengthThreshold ? scalpEngine.getEffectiveStrengthThreshold(profile, market) : profile.strength_threshold;
@@ -1118,30 +1148,52 @@ async function runExitPipeline() {
       strengthPeak60s: snapshot.strength_proxy_60s ?? snapshot.strength_peak_60s
     };
     const currentEntryScore = scalpState[market]?.entryScore ?? null;
-    const { exit, reason } = TradeExecutor.checkExit(position, snapshot, currentPrice, currentEntryScore);
+    const { exit, reason } = ExitPolicy.evaluate(position, snapshot, currentPrice, currentEntryScore);
     if (!exit) continue;
     const volume = Math.floor(balance * 1e8) / 1e8;
     if (volume <= 0) continue;
+    if (!ApiAccessPolicy.canPlaceOrder(state)) continue;
     try {
-      await withUpbitFailover(async () => {
+      const order = await withUpbitFailover(async () => {
         const k = getActiveUpbitKeys();
         return TradeExecutor.placeMarketSellByVolume(k.accessKey, k.secretKey, market, volume);
       });
+      const executedPrice = order && (order.price != null ? order.price : order.avg_price);
+      const exitPrice = executedPrice != null ? Number(executedPrice) : currentPrice;
+      const totalBuyKrw = entryPrice * volume;
+      const totalEvalKrw = exitPrice * volume;
+      const math = require('./src/shared/utils/math');
+      const exitProfitPct = math.calculateNetProfitPct(totalBuyKrw, totalEvalKrw, UPBIT_FEE_RATE);
+      const exitProfitKrw = math.calculateNetProfitKrw(totalBuyKrw, totalEvalKrw, UPBIT_FEE_RATE);
+      const entryTimeMs = acc.updated_at ? new Date(acc.updated_at).getTime() : null;
+      const durationSec = entryTimeMs != null ? Math.round((Date.now() - entryTimeMs) / 1000) : 0;
+      const durationStr = entryTimeMs != null
+        ? (durationSec >= 3600 ? `${Math.floor(durationSec / 3600)}h ${Math.floor((durationSec % 3600) / 60)}m` : durationSec >= 60 ? `${Math.floor(durationSec / 60)}m ${durationSec % 60}s` : `${durationSec}s`)
+        : '—';
+
       const label = TradeExecutor.getExitReasonLabel ? TradeExecutor.getExitReasonLabel(reason) : (reason || '청산');
       tradeLogger.logTag('EXIT', `${market} ${label}`, { market, reason, volume });
-      recordTrade({
+      state.assets = await fetchAssets();
+      const exitRow = {
         timestamp: new Date().toISOString(),
         ticker: market,
         side: 'sell',
-        price: currentPrice,
+        price: exitPrice,
         quantity: volume,
         fee: 0,
-        revenue: (currentPrice - entryPrice) * volume,
-        net_return: ((currentPrice - entryPrice) / entryPrice) * 100,
+        revenue: (exitPrice - entryPrice) * volume,
+        net_return: exitProfitPct / 100,
         reason: label,
         strategy_id: state.currentStrategyId
-      });
-      state.assets = await fetchAssets();
+      };
+      exitRow.portfolioProfitPct = getProfitPct(state.assets);
+      exitRow.exitProfitPct = exitProfitPct;
+      exitRow.exitProfitKrw = exitProfitKrw;
+      exitRow.exitPrice = exitPrice;
+      exitRow.avgPrice = entryPrice;
+      exitRow.duration = durationStr;
+      exitRow.symbol = market.replace('KRW-', '');
+      recordTrade(exitRow);
       if (state.accounts) {
         const idx = state.accounts.findIndex((a) => (a.currency || '').toUpperCase() === currency.toUpperCase());
         if (idx >= 0) state.accounts[idx] = { ...state.accounts[idx], balance: '0' };
@@ -1212,8 +1264,20 @@ function recordTrade(row) {
     tradeLogger.logTag('EXIT', `Reason: ${row.reason || '—'}, Profit: ${pct}%`, { reason: row.reason, net_return: row.net_return });
   }
   if (discordBot.sendTradeAlert) {
-    const pct = row.net_return != null ? row.net_return * 100 : undefined;
-    discordBot.sendTradeAlert({ ticker: row.ticker, side: row.side, price: row.price, quantity: row.quantity, currentReturnPct: pct }).catch(() => {});
+    const pct = row.portfolioProfitPct != null ? row.portfolioProfitPct : (row.net_return != null ? row.net_return * 100 : undefined);
+    discordBot.sendTradeAlert({
+      ticker: row.ticker,
+      side: row.side,
+      price: row.price,
+      quantity: row.quantity,
+      currentReturnPct: pct,
+      profitPct: row.exitProfitPct,
+      profitKrw: row.exitProfitKrw,
+      exitPrice: row.exitPrice,
+      avgPrice: row.avgPrice,
+      duration: row.duration,
+      symbol: row.symbol
+    }).catch(() => {});
   }
   try {
     tradeHistoryLogger.appendTradeHistory(row, { rsi: row.rsi, trend_score: row.trend_score });
@@ -1351,9 +1415,25 @@ const tradingEngine = new TradingEngine(EngineStateStore, {
   CLEANUP_HOUR_4AM
 });
 
+const RECOVERY_FETCH_INTERVAL_MS = 10 * 1000;
+
 async function runOneTick() {
+  const mode = ApiAccessPolicy.refreshEngineMode(EngineStateStore);
+  if (mode === EngineMode.EMERGENCY_PAUSE) {
+    if (typeof io !== 'undefined' && io.emit) io.emit('dashboard:state', EngineStateStore.get()).catch(() => {});
+    return;
+  }
   updateRaceHorseState();
-  state.assets = await fetchAssets();
+  if (mode === EngineMode.RECOVERY) {
+    const now = Date.now();
+    const last = state.lastRecoveryFetchAt ?? 0;
+    if (now - last >= RECOVERY_FETCH_INTERVAL_MS) {
+      state.assets = await fetchAssets();
+      EngineStateStore.update({ lastRecoveryFetchAt: now });
+    }
+  } else {
+    state.assets = await fetchAssets();
+  }
   if (state.botEnabled && apiKeys.accessKey && apiKeys.secretKey) {
     try {
       state.accounts = await withUpbitFailover(async () => {
@@ -1442,8 +1522,8 @@ async function runOneTick() {
         : use50PercentOrder
           ? amountKrw
           : computeOrderQuantityWithMpi(market, baseKrwForOrder, currentPrice).quantityKrw;
-      if (orderableKrw > 0 && quantityKrw * 1.0005 > orderableKrw) {
-        quantityKrw = Math.min(quantityKrw, Math.floor(orderableKrw * 0.99));
+      if (orderableKrw > 0 && quantityKrw * (1 + UPBIT_FEE_RATE) > orderableKrw) {
+        quantityKrw = Math.min(quantityKrw, Math.floor(orderableKrw / (1 + UPBIT_FEE_RATE)));
       }
       if (quantityKrw >= (configDefault.MIN_ORDER_KRW || 5000)) {
         const useRiskExecution = USE_SIGNAL_ENGINE && riskEngineFromBootstrap && executionEngineFromBootstrap;
@@ -1462,6 +1542,8 @@ async function runOneTick() {
             if (discordBot.sendToChannel) {
               discordBot.sendToChannel('🛑 Risk Rejected: ' + (verdict.reasons?.join(', ') || 'UNKNOWN')).catch(() => {});
             }
+          } else if (!ApiAccessPolicy.canPlaceOrder(state)) {
+            tradeLogger.logTag('거절', 'Orchestrator ENTER (Risk): PAUSE/RECOVERY로 주문 불가', { market });
           } else {
             try {
               const plan = { mode: 'MARKET', market, budgetKrw: Math.round(quantityKrw), slices: [{ ratio: 1, type: 'MARKET' }], maxSlippageBp: 50 };
@@ -1501,6 +1583,9 @@ async function runOneTick() {
             }
           }
         } else {
+          if (!ApiAccessPolicy.canPlaceOrder(state)) {
+            tradeLogger.logTag('거절', 'Orchestrator ENTER: PAUSE/RECOVERY로 주문 불가', { market });
+          } else {
           try {
             const order = await withUpbitFailover(() => {
               const k = getActiveUpbitKeys();
@@ -1532,6 +1617,8 @@ async function runOneTick() {
             discordBot.sendErrorAlert('오케스트레이터 매수 실패', err?.message).catch(() => {});
           }
         }
+          }
+      }
       } else if (quantityKrw > 0 && quantityKrw < (configDefault.MIN_ORDER_KRW || 5000)) {
         tradeLogger.logTag('거절', 'Orchestrator ENTER: 주문가능KRW 부족으로 매수 스킵 (최소주문금액 미달)', { market, quantityKrw, orderableKrw });
         if (discordBot.sendToChannel) discordBot.sendToChannel('⚠️ 잔액 부족으로 매수 건너뜀 (최소 주문금액 미달)').catch(() => {});
@@ -1539,18 +1626,21 @@ async function runOneTick() {
     }
   }
 
-  try {
-    scalpRunner.tick({
-      upbit,
-      state,
-      apiKeys,
-      TradeExecutor,
-      recordTrade,
-      emitDashboard,
-      sendAlert: (msg) => { if (discordBot.sendToChannel) discordBot.sendToChannel(msg).catch(() => {}); }
-    });
-  } catch (e) {
-    console.warn('scalpRunner.tick:', e?.message);
+  if (state.scalpMode && scalpState.isRunning) {
+    try {
+      await scalpRunner.tick({
+        upbit,
+        state,
+        apiKeys,
+        TradeExecutor,
+        recordTrade,
+        emitDashboard,
+        sendAlert: (msg) => { if (discordBot.sendToChannel) discordBot.sendToChannel(msg).catch(() => {}); }
+      });
+      if (!scalpState.isRunning) EngineStateStore.update({ scalpMode: false });
+    } catch (e) {
+      console.warn('scalpRunner.tick:', e?.message);
+    }
   }
 }
 
@@ -1630,7 +1720,11 @@ function getTradingEngineCallbacks() {
       }
     },
     emitDashboard: () => emitDashboard(),
-    onPollError: (err) => console.error('poll error:', err?.message)
+    onPollError: (err) => console.error('poll error:', err?.message),
+    setAbortController: (controller) => {
+      if (controller) upbit.setAbortSignal(controller.signal);
+      else upbit.clearAbortSignal();
+    }
   };
 }
 
@@ -1805,6 +1899,11 @@ io.on('connection', (socket) => {
       if (typeof cb === 'function') cb({ success: false, message: 'API Key가 설정되지 않았습니다.' });
       return;
     }
+    if (!ApiAccessPolicy.canPlaceOrder(state)) {
+      emitManualLog('error', 'PAUSE/RECOVERY 중에는 주문할 수 없습니다.');
+      if (typeof cb === 'function') cb({ success: false, message: 'PAUSE/RECOVERY 중에는 주문할 수 없습니다.' });
+      return;
+    }
     emitManualLog('info', `${market} ${amountKrw.toLocaleString('ko-KR')}원 시장가 매수 요청 중…`);
     try {
       const order = await withUpbitFailover(async () => {
@@ -1865,6 +1964,11 @@ io.on('connection', (socket) => {
     if (volume <= 0) {
       emitManualLog('error', `${currency} 보유 수량이 없습니다.`);
       if (typeof cb === 'function') cb({ success: false, message: `${currency} 보유 수량이 없습니다.` });
+      return;
+    }
+    if (!ApiAccessPolicy.canPlaceOrder(state)) {
+      emitManualLog('error', 'PAUSE/RECOVERY 중에는 주문할 수 없습니다.');
+      if (typeof cb === 'function') cb({ success: false, message: 'PAUSE/RECOVERY 중에는 주문할 수 없습니다.' });
       return;
     }
     emitManualLog('info', `${market} 전량(${volume}) 시장가 매도 요청 중…`);
@@ -2061,15 +2165,20 @@ const initPromise = (async () => {
     setIndependentScalpActivate: (mode = 'SUPER_AGGRESSIVE') => {
       if (StrategyManager.getRelaxedModeRemainingMs() > 0) StrategyManager.setRelaxedMode(0);
       scalpState.activate(mode);
+      EngineStateStore.update({ scalpMode: true });
       emitDashboard().catch(() => {});
       persistSystemState();
       return { success: true, remainingMs: scalpState.getRemainingMs() };
     },
-    /** 독립 스캘프 중지 (우선권 MAIN 반납) */
+    /** 독립 스캘프 중지 (우선권 MAIN 반납). 자산 동기화 후 일반 모드 주도권 복원 */
     setIndependentScalpStop: () => {
+      EngineStateStore.update({ scalpMode: false, botEnabled: true });
       scalpState.stop();
-      emitDashboard().catch(() => {});
-      persistSystemState();
+      fetchAssets().then((a) => {
+        if (a != null) state.assets = a;
+        emitDashboard().catch(() => {});
+        persistSystemState();
+      }).catch(() => {});
       return { success: true };
     },
     /** 독립 스캘프 3시간 연장: 남은 시간(ms)이 60분 미만일 때만 expiryTime에 3*60*60*1000 추가 */
@@ -2122,7 +2231,7 @@ const initPromise = (async () => {
         aiUsage: gemini.getDailyUsage ? gemini.getDailyUsage() : null,
         ...getModeRemainingOpts()
       });
-      const profitPctNum = getProfitPct(assets);
+      const profitPctNum = positionEngineFromBootstrap ? positionEngineFromBootstrap.getProfitPct(assets) : getProfitPct(assets);
       const totalEval = assets?.totalEvaluationKrw ?? 0;
       try {
         const { geminiEnabled } = EngineStateStore.get();
@@ -2154,11 +2263,11 @@ const initPromise = (async () => {
     currentReturn: async () => {
       state.assets = await fetchAssets();
       const assets = state.assets;
-      const totalBuyKrw = Math.floor(assets?.totalBuyKrwForCoins ?? assets?.totalBuyKrw ?? 0);
-      const totalEvalCoins = Math.floor(assets?.evaluationKrwForCoins ?? 0);
+      const totalBuyKrw = Math.floor(Number(assets?.totalBuyKrwForCoins ?? 0) || 0);
+      const totalEvalCoins = Math.floor(Number(assets?.evaluationKrwForCoins ?? 0) || 0);
       const totalKrw = Math.floor(assets?.orderableKrw ?? 0);
       const profitLossKrw = totalEvalCoins - totalBuyKrw;
-      const profitPctNum = getProfitPct(assets);
+      const profitPctNum = positionEngineFromBootstrap ? positionEngineFromBootstrap.getProfitPct(assets) : getProfitPct(assets);
       const pctStr = (totalBuyKrw <= 0 ? 0 : Math.floor(profitPctNum * 100) / 100).toFixed(2) + '%';
       const isProfit = profitLossKrw > 0;
       const isZero = profitLossKrw === 0;
@@ -2369,6 +2478,7 @@ const initPromise = (async () => {
     },
     sellAll: async () => {
       if (!apiKeys.accessKey || !apiKeys.secretKey) return 'API 키 미설정';
+      if (!ApiAccessPolicy.canPlaceOrder(state)) return 'PAUSE/RECOVERY 중에는 주문할 수 없습니다.';
       let accounts;
       try {
         accounts = await withUpbitFailover(async () => {
@@ -2952,15 +3062,26 @@ const initPromise = (async () => {
         });
         if (typeof upbit.setRateLimitAlertCallback === 'function') {
           upbit.setRateLimitAlertCallback(() => {
-            if (discordBot.sendToChannel) discordBot.sendToChannel('⚠️ API 요청 제한으로 재시도 중').catch(() => {});
+            if (discordBot.sendToChannel) discordBot.sendToChannel('⚠️ 업비트 429 — 5분간 API 일시 중단').catch(() => {});
           });
         }
         if (typeof upbit.setEmergencyPauseCallback === 'function') {
           upbit.setEmergencyPauseCallback((pauseMs) => {
-            const ms = pauseMs || 60000;
-            state.emergencyPauseUntil = Date.now() + ms;
+            const ms = pauseMs || 5 * 60 * 1000;
+            const now = Date.now();
+            const s = EngineStateStore.get();
+            const shouldLog = ApiAccessPolicy.shouldLogPauseState(now, s.lastPauseLogAt, ApiAccessPolicy.PAUSE_LOG_MIN_INTERVAL_MS);
+            EngineStateStore.update({
+              emergencyPauseUntil: now + ms,
+              emergencyPauseReason: 'rate_limit_429',
+              mode: EngineMode.EMERGENCY_PAUSE,
+              lastPauseLogAt: now
+            });
+            if (shouldLog) {
+              console.warn('[EngineMode] EMERGENCY_PAUSE 진입 (429)', { until: now + ms, reason: 'rate_limit_429' });
+            }
             if (discordBot.sendToChannel) {
-              discordBot.sendToChannel(`⚠️ 업비트 429 발생 — ${ms / 1000}초간 API 일시 중단 (Emergency Pause)`).catch(() => {});
+              discordBot.sendToChannel(`⚠️ 업비트 429 발생 — ${Math.round(ms / 1000)}초간 API 일시 중단 (Emergency Pause)`).catch(() => {});
             }
           });
         }

@@ -8,5 +8,6 @@
   "soft_criteria": {
     "active": false,
     "endTime": null
-  }
+  },
+  "gemini_enabled": true
 }

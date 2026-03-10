@@ -61,6 +61,7 @@ function evaluateFromLegacy(ctx) {
   };
 
   const legacy = {
+    score: pipeline.score,
     p0Allowed: pipeline.p0Allowed === true,
     p0Reason: pipeline.p0Reason ?? null,
     priceBreak: !!pipeline.priceBreak,

@@ -3,7 +3,12 @@
  * - start(): 메인 폴, FX, 시황분석, persist, rejectLog emit, DB/시스템 클린업 등 스케줄
  * - stop(): 모든 타이머 해제 + serviceStopped 설정
  * - isProcessing 락으로 fetchAssets/runScalpCycle 등 중복 실행 방지
+ * - EMERGENCY_PAUSE 시 runOneTick 생략, emitDashboard만 수행 (로그 flood 방지)
  */
+
+const path = require('path');
+const ApiAccessPolicy = require(path.join(__dirname, '../../src/domain/state/ApiAccessPolicy'));
+const EngineMode = require(path.join(__dirname, '../../src/domain/state/EngineMode'));
 
 class TradingEngine {
   constructor(stateStore, options = {}) {
@@ -21,6 +26,8 @@ class TradingEngine {
     this.timeoutIds = [];
     this.isProcessing = false;
     this._running = false;
+    this.abortController = null;
+    this._setAbortController = null;
   }
 
   _clearAll() {
@@ -36,9 +43,19 @@ class TradingEngine {
   }
 
   /**
-   * 정지: 모든 주기 호출 중단, serviceStopped 플래그 설정
+   * 정지: 모든 주기 호출 중단, 진행 중인 Upbit fetch 요청 취소, serviceStopped 플래그 설정
    */
   stop() {
+    if (this._setAbortController) {
+      try {
+        this._setAbortController(null);
+      } catch (_) {}
+    }
+    if (this.abortController) {
+      try {
+        this.abortController.abort();
+      } catch (_) {}
+    }
     this._clearAll();
     this.stateStore.update({ serviceStopped: true, botEnabled: false });
   }
@@ -51,6 +68,14 @@ class TradingEngine {
     if (this._running) return;
     const c = callbacks || {};
     this.stateStore.update({ serviceStopped: false });
+
+    this.abortController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    this._setAbortController = typeof c.setAbortController === 'function' ? c.setAbortController : null;
+    if (this._setAbortController) {
+      try {
+        this._setAbortController(this.abortController);
+      } catch (_) {}
+    }
 
     const runOneTick = typeof c.runOneTick === 'function' ? c.runOneTick : () => {};
     const runFx = typeof c.runFx === 'function' ? c.runFx : () => {};
@@ -69,7 +94,8 @@ class TradingEngine {
         if (c.emitDashboard) c.emitDashboard().catch(() => {});
         return;
       }
-      if (state.emergencyPauseUntil != null && Date.now() < state.emergencyPauseUntil) {
+      const mode = ApiAccessPolicy.refreshEngineMode(this.stateStore);
+      if (mode === EngineMode.EMERGENCY_PAUSE) {
         if (c.emitDashboard) c.emitDashboard().catch(() => {});
         return;
       }
