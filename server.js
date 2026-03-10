@@ -2568,10 +2568,24 @@ const initPromise = (async () => {
     return out;
   }
 
-  /** 거래 부재 진단 누적 (최대 20건). suggestLogic은 5회 이상일 때만 분석 */
+  /** 거래 부재 진단 누적 (최대 20건). suggestLogic은 5회 이상일 때만 분석. 항목: { ts, source, localSummary, finalBody, meta } */
   const diagnosticsStore = [];
   const DIAGNOSTICS_STORE_MAX = 20;
   const MIN_DIAGNOSTICS_FOR_SUGGEST = 5;
+  /** 진단/수정안 Embed footer용 프롬프트 버전 (품질 추적용) */
+  const DIAGNOSIS_PROMPT_VERSION = 'v1';
+  const LOGIC_PROMPT_VERSION = 'v2';
+
+  /** 수정안 제안 Gemini 응답 품질 검증: 위험한 과도 제안·비정상 길이 시 fallback 유도 */
+  function validateLogicSuggestionResponse(text) {
+    if (!text || typeof text !== 'string') return false;
+    const t = text.trim();
+    if (t.length < 10) return false;
+    if (t.length > 2500) return false;
+    const dangerous = /모든\s*기준을\s*낮추세요|전부\s*완화|일괄\s*낮추세요|기준\s*전부\s*완화/;
+    if (dangerous.test(t)) return false;
+    return true;
+  }
 
   /** 오늘(일 단위) 로그만 수집 — logs/*.log 중 오늘 날짜가 포함된 라인만 (pm2 템플릿 %name% 제외) */
   function readTodayLogContent() {
@@ -2779,28 +2793,13 @@ const initPromise = (async () => {
           db.getTradesSinceHours(hours),
           db.getRejectLogsSinceHours(hours)
         ]);
-        const recentLogs = tradeLogger.getRecentLogs();
         const profile = scalpEngine.getProfile() || {};
         const assets = state.assets;
         const lastRejectStr = Object.keys(lastRejectBySymbol).length
-          ? Object.entries(lastRejectBySymbol).map(([sym, r]) => `${sym}: ${r}`).join(' | ')
+          ? Object.entries(lastRejectBySymbol).map(([sym, r]) => `${sym}: ${(r || '').slice(0, 40)}`).join(' | ')
           : '없음';
-        const lines = [
-          `[최근 ${hours}시간 매매 횟수] ${trades12h.length}건`,
-          `[최근 ${hours}시간 거절 횟수] ${reject12h.length}건`,
-          `[엔진 가동 여부] ${state.botEnabled ? 'ON' : 'OFF'}`,
-          `[주문 가능 원화] ${assets?.orderableKrw != null ? Number(assets.orderableKrw).toLocaleString('ko-KR') : '—'}원`,
-          `[프로필/RSI 관련] entry_score_min=${profile.entry_score_min ?? '—'}, rsi_oversold=${profile.rsi_oversold ?? '—'}, strength_threshold=${profile.strength_threshold ?? '—'}`,
-          `[마지막 거절 사유(종목별)] ${lastRejectStr}`,
-          '[거절 로그 샘플]',
-          ...(reject12h.slice(0, 15).map((r) => `${r.timestamp} ${r.ticker} ${r.reason}`)),
-          '[최근 매매 로그]',
-          ...(trades12h.slice(0, 10).map((t) => `${t.timestamp} ${t.ticker} ${t.side} ${t.price}`)),
-          '[실시간 로그 버퍼]',
-          ...recentLogs.slice(-30)
-        ];
         const diagnoseAnalyzer = require('./lib/diagnoseNoTradeAnalyzer');
-        const summary = diagnoseAnalyzer.buildDiagnoseSummary({
+        const localSummary = diagnoseAnalyzer.buildDiagnoseSummary({
           trades12h,
           reject12h,
           profile,
@@ -2808,17 +2807,57 @@ const initPromise = (async () => {
           lastRejectBySymbol,
           botEnabled: state.botEnabled
         });
-        if (summary) {
-          diagnosticsStore.push(summary);
+        const rejectReasonsSample = reject12h.slice(0, 10).map((r) => r.reason || '').filter(Boolean).join('; ') || '없음';
+        const structuredForGemini = [
+          `[최근 ${hours}시간 매매 건수] ${trades12h.length}`,
+          `[최근 ${hours}시간 거절 건수] ${reject12h.length}`,
+          `[거절 주요 사유 샘플] ${rejectReasonsSample}`,
+          `[프로필] entry_score_min=${profile.entry_score_min ?? '—'}, strength_threshold=${profile.strength_threshold ?? '—'}, rsi_oversold=${profile.rsi_oversold ?? '—'}`,
+          `[주문 가능 원화] ${assets?.orderableKrw != null ? Number(assets.orderableKrw).toLocaleString('ko-KR') : '—'}원`,
+          `[엔진 가동] ${state.botEnabled ? 'ON' : 'OFF'}`,
+          `[종목별 마지막 거절] ${lastRejectStr}`,
+          '[로컬 진단 요약]',
+          localSummary || '없음'
+        ].join('\n');
+
+        let body = localSummary || '진단 데이터 수집 완료. 요약을 생성할 수 없습니다.';
+        let usedGemini = false;
+        if (EngineStateStore.get().geminiEnabled) {
+          try {
+            const gemini = require('./lib/gemini');
+            const geminiResult = await gemini.askGeminiForNoTradeDiagnosis(structuredForGemini);
+            if (geminiResult && typeof geminiResult === 'string' && geminiResult.trim().length >= 10) {
+              body = geminiResult.trim();
+              usedGemini = true;
+            }
+          } catch (e) {
+            if (typeof require('./lib/gemini').handleGeminiError === 'function') require('./lib/gemini').handleGeminiError(e);
+          }
+        }
+        if (body) {
+          diagnosticsStore.push({
+            ts: Date.now(),
+            source: usedGemini ? 'gemini' : 'local',
+            localSummary: localSummary || '',
+            finalBody: body,
+            meta: {
+              trades12h: trades12h.length,
+              rejects12h: reject12h.length,
+              topRejectReasons: rejectReasonsSample,
+              entryScoreMin: profile.entry_score_min ?? null,
+              strengthThreshold: profile.strength_threshold ?? null,
+              orderableKrw: assets?.orderableKrw ?? null,
+              botEnabled: state.botEnabled
+            }
+          });
           if (diagnosticsStore.length > DIAGNOSTICS_STORE_MAX) diagnosticsStore.shift();
         }
-        const body = summary || '진단 데이터 수집 완료. 요약을 생성할 수 없습니다.';
         return new MessageEmbed()
           .setTitle('🔍 거래 부재 원인 진단')
           .setColor(ANALYST_EMBED_COLOR)
           .setDescription(body)
           .addFields({ name: '수집 데이터', value: `최근 ${hours}h 매매 ${trades12h.length}건, 거절 ${reject12h.length}건`, inline: false })
-          .setFooter({ text: '로컬 분석 · 3줄 요약 (Cursor)' })
+          .setFooter({ text: usedGemini ? `Gemini 2.5 Flash · prompt ${DIAGNOSIS_PROMPT_VERSION}` : `로컬 분석 (fallback) · ${DIAGNOSIS_PROMPT_VERSION}` })
           .setTimestamp();
       } catch (e) {
         return new MessageEmbed()
@@ -2839,14 +2878,45 @@ const initPromise = (async () => {
             .addFields({ name: '안내', value: '「🔍 거래 부재 원인 진단」 버튼을 여러 번 실행해 진단을 쌓아 주세요.', inline: false })
             .setTimestamp();
         }
+        const entries = diagnosticsStore.map((d) => (typeof d === 'string' ? { finalBody: d, meta: {} } : d));
         const diagnoseAnalyzer = require('./lib/diagnoseNoTradeAnalyzer');
-        const suggestion = diagnoseAnalyzer.buildSuggestSummary(diagnosticsStore);
-        const body = suggestion || '제안을 생성할 수 없습니다.';
+        const baseSuggestion = diagnoseAnalyzer.buildSuggestSummary(entries.map((e) => e.finalBody));
+        let body = baseSuggestion || '제안을 생성할 수 없습니다.';
+        let usedGemini = false;
+        if (EngineStateStore.get().geminiEnabled) {
+          const principleBlock = [
+            '[안전 원칙]',
+            '- 안전장치 완화는 매우 보수적으로 할 것.',
+            '- 한 번에 1~2개 항목만 제안할 것.',
+            '- 근거 없는 threshold 완화 금지. 수정 금지 항목이 있으면 명시할 것.',
+            '- 20줄 이내로만 출력.'
+          ].join('\n');
+          const accumulatedParts = entries.map((e, i) => {
+            const meta = e.meta || {};
+            const metaLine = Object.keys(meta).length
+              ? `[메타] 매매 ${meta.trades12h ?? '—'}건, 거절 ${meta.rejects12h ?? '—'}건, entry_score_min=${meta.entryScoreMin ?? '—'}, strength_threshold=${meta.strengthThreshold ?? '—'}, orderableKrw=${meta.orderableKrw ?? '—'}, bot=${meta.botEnabled ?? '—'}, topRejectReasons=${(meta.topRejectReasons || '').slice(0, 80)}`
+              : '';
+            return `[진단 ${i + 1}]\n${e.finalBody}${metaLine ? '\n' + metaLine : ''}`;
+          });
+          const accumulatedText = accumulatedParts.join('\n---\n');
+          const principleAndAccumulated = `${principleBlock}\n\n[누적 진단 요약]\n${accumulatedText}`;
+          try {
+            const gemini = require('./lib/gemini');
+            const geminiResult = await gemini.askGeminiForLogicSuggestion(principleAndAccumulated);
+            const trimmed = geminiResult && typeof geminiResult === 'string' ? geminiResult.trim() : '';
+            if (validateLogicSuggestionResponse(trimmed)) {
+              body = trimmed;
+              usedGemini = true;
+            }
+          } catch (e) {
+            if (typeof require('./lib/gemini').handleGeminiError === 'function') require('./lib/gemini').handleGeminiError(e);
+          }
+        }
         return new MessageEmbed()
           .setTitle('💡 매매 로직 수정안 제안')
           .setColor(ANALYST_EMBED_COLOR)
           .setDescription(body)
-          .setFooter({ text: '로컬 분석 · scalpEngine/RSI 등 참고 (Cursor)' })
+          .setFooter({ text: usedGemini ? `Gemini 2.5 Flash · logic ${LOGIC_PROMPT_VERSION}` : `로컬 분석 (fallback) · ${LOGIC_PROMPT_VERSION}` })
           .setTimestamp();
       } catch (e) {
         return new MessageEmbed()
