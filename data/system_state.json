@@ -6,8 +6,8 @@
   },
   "ai_weight": [],
   "soft_criteria": {
-    "active": true,
-    "endTime": 1773175103682
+    "active": false,
+    "endTime": null
   },
   "gemini_enabled": true
 }

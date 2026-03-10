@@ -909,6 +909,49 @@ function buildSnapshotFromOrderbook(orderbookItem, ticker, market) {
 
 const MIN_ORDER_KRW = configDefault.MIN_ORDER_KRW != null ? configDefault.MIN_ORDER_KRW : 5000;
 
+/**
+ * 회전 exit-first: symbolsToSell에 대해 시장가 매도만 수행. 같은 틱에 매수하지 않음.
+ * @param {string[]} symbolsToSell - 매도할 코인 심볼 (BTC, ETH 등)
+ * @returns {Promise<{ sold: string[], errors: string[] }>}
+ */
+async function executeRotationSell(symbolsToSell) {
+  const sold = [];
+  const errors = [];
+  if (!symbolsToSell || symbolsToSell.length === 0) return { sold, errors };
+  if (!apiKeys.accessKey || !apiKeys.secretKey) return { sold, errors };
+  const accounts = state.accounts || [];
+  for (const sym of symbolsToSell) {
+    const market = 'KRW-' + sym;
+    const acc = accounts.find((a) => (a.currency || '').toUpperCase() === sym.toUpperCase());
+    const balance = acc ? parseFloat(acc.balance || 0) : 0;
+    if (balance <= 0) continue;
+    const volume = Math.floor(balance * 1e8) / 1e8;
+    if (volume <= 0) continue;
+    try {
+      const order = await withUpbitFailover(async () => {
+        const k = getActiveUpbitKeys();
+        return TradeExecutor.placeMarketSellByVolume(k.accessKey, k.secretKey, market, volume);
+      });
+      const price = order && (order.price != null ? order.price : order.avg_price);
+      tradeLogger.logTag('ROTATION_SELL', `${market} 회전 매도 (exit-first)`, { market, volume, price });
+      sold.push(sym);
+      state.assets = await fetchAssets();
+      if (state.botEnabled && apiKeys.accessKey && apiKeys.secretKey) {
+        try {
+          state.accounts = await withUpbitFailover(async () => {
+            const k = getActiveUpbitKeys();
+            return upbit.getAccounts(k.accessKey, k.secretKey) || [];
+          });
+        } catch (_) {}
+      }
+    } catch (err) {
+      errors.push(sym + ': ' + (err?.message || ''));
+      tradeLogger.logTag('에러', 'Rotation sell 실패: ' + market, { error: err?.message });
+    }
+  }
+  return { sold, errors };
+}
+
 /** 경주마 스케줄 반영 + state 동기화 (StrategyManager 단일 소스). 창 종료 시 회전 카운트 리셋 */
 function updateRaceHorseState() {
   const wasActive = state.raceHorseActive;
@@ -1571,19 +1614,39 @@ async function runOneTick() {
         .map((a) => (a.currency || '').toUpperCase());
       const holdingAllowed = (positionSymbols || []).filter((s) => raceHorsePolicy.isSymbolAllowedForRaceHorse(s));
       let rotationBlock = false;
-      if (state.raceHorseActive && isRaceHorseTimeWindow && holdingAllowed.length > 0 && !holdingAllowed.includes(symbol)) {
+      let multiAction = null;
+      if (state.raceHorseActive && isRaceHorseTimeWindow && holdingAllowed.length > 0) {
         const signalsBySymbol = { [symbol]: { signal: orchResult.signal, finalScore: orchResult.finalScore } };
         const rankedUniverse = raceHorsePolicy.rankRaceHorseUniverse(state.scalpState, signalsBySymbol, profile?.entry_score_min ?? 4);
         const lastEntryBySymbol = typeof orchestrator.getLastEntryBySymbol === 'function' ? orchestrator.getLastEntryBySymbol() : {};
         const now = Date.now();
         const holdSecondsBySymbol = {};
-        holdingAllowed.forEach((s) => { holdSecondsBySymbol[s] = (now - (lastEntryBySymbol[s] || 0)) / 1000; });
-        const getScore = (sym) => rankedUniverse.find((r) => r.symbol === sym)?.score ?? 0;
-        const bestHolding = holdingAllowed.length ? [...holdingAllowed].sort((a, b) => getScore(b) - getScore(a))[0] : null;
-        const rotCtx = { rankedUniverse, holdSecondsBySymbol, profile, scalpState: state.scalpState, accounts: state.accounts };
-        const rot = raceHorsePolicy.shouldRotateHolding(bestHolding, symbol, rotCtx);
-        if (!rot.allowed) {
-          tradeLogger.logTag('거절', '경주마: 회전 우위 부족', { from: holdingAllowed[0], to: symbol, reason: rot.reason });
+        const holdingScoreDecayBySymbol = {};
+        const entryMin = profile?.entry_score_min ?? 4;
+        holdingAllowed.forEach((s) => {
+          holdSecondsBySymbol[s] = (now - (lastEntryBySymbol[s] || 0)) / 1000;
+          const m = 'KRW-' + s;
+          const entryScore = state.scalpState && state.scalpState[m] ? (state.scalpState[m].entryScore ?? entryMin) : entryMin;
+          holdingScoreDecayBySymbol[s] = entryScore < entryMin ? Math.min(1, (entryMin - entryScore) / Math.max(1, entryMin)) : 0;
+        });
+        const rotCtx = {
+          rankedUniverse,
+          holdSecondsBySymbol,
+          holdingScoreDecayBySymbol,
+          profile,
+          scalpState: state.scalpState,
+          accounts: state.accounts
+        };
+        multiAction = raceHorsePolicy.decideMultiPositionAction(holdingAllowed, rankedUniverse, rotCtx);
+        if ((multiAction.action === 'FULL_SWITCH_ONE_ASSET' || multiAction.action === 'REDUCE_WEAKER_ADD_WINNER') && multiAction.toSymbol === symbol) {
+          await executeRotationSell(multiAction.symbolsToSell || []);
+          state.rotationDidExitFirst = { toSymbol: multiAction.toSymbol, at: Date.now() };
+          tradeLogger.logTag('ROTATION', 'exit-first 완료, 이번 틱 매수 없음', { action: multiAction.action, sold: multiAction.symbolsToSell, toSymbol: multiAction.toSymbol });
+          rotationBlock = true;
+        } else if (multiAction.action === 'HOLD_ALL' && multiAction.toSymbol !== symbol) {
+          tradeLogger.logTag('거절', '경주마: HOLD_ALL, 회전 미허용', { toSymbol: multiAction.toSymbol, signalSymbol: symbol, reason: multiAction.reason });
+          rotationBlock = true;
+        } else if (multiAction.action === 'NO_ACTION' && !holdingAllowed.includes(symbol)) {
           rotationBlock = true;
         }
       }
@@ -1594,8 +1657,9 @@ async function runOneTick() {
       const currentPrice = state.prices[market]?.tradePrice ?? state.prices[market]?.trade_price ?? null;
       const totalCoinEval = state.assets?.evaluationKrwForCoins ?? Math.max(0, (state.assets?.totalEvaluationKrw ?? 0) - (orderableKrw || 0));
       const scalpStateEntry = state.scalpState && state.scalpState[market] ? state.scalpState[market] : null;
+      const snapshotForTier = state.lastSnapshots && state.lastSnapshots[market] ? state.lastSnapshots[market] : null;
       const raceHorseTier = (state.raceHorseActive && isRaceHorseTimeWindow)
-        ? raceHorsePolicy.evaluateRaceHorseConviction(orchResult.signal, orchResult.finalScore, scalpStateEntry)
+        ? raceHorsePolicy.evaluateRaceHorseConviction(orchResult.signal, orchResult.finalScore, scalpStateEntry, { symbol, snapshot: snapshotForTier })
         : null;
       const { amountKrw, raceHorseTier: tier, skipReason } = scalpEngine.getBuyOrderAmountKrw({
         orderableKrw,
@@ -1661,7 +1725,10 @@ async function runOneTick() {
                   strategy_id: state.currentStrategyId
                 });
                 orchestrator.recordEntry(orchResult.signal.symbol, orchResult.chosenStrategy);
-                if (isRotationEnter && raceHorsePolicy.incrementSessionRotationCount) raceHorsePolicy.incrementSessionRotationCount();
+                if ((isRotationEnter || (state.rotationDidExitFirst && state.rotationDidExitFirst.toSymbol === symbol)) && raceHorsePolicy.incrementSessionRotationCount) {
+                  raceHorsePolicy.incrementSessionRotationCount();
+                  if (state.rotationDidExitFirst) delete state.rotationDidExitFirst;
+                }
                 state.assets = await fetchAssets();
                 emitDashboard().catch(() => {});
               } else if (!result.success) {
@@ -1702,7 +1769,10 @@ async function runOneTick() {
             strategy_id: state.currentStrategyId
           });
           orchestrator.recordEntry(orchResult.signal.symbol, orchResult.chosenStrategy);
-          if (isRotationEnter && raceHorsePolicy.incrementSessionRotationCount) raceHorsePolicy.incrementSessionRotationCount();
+          if ((isRotationEnter || (state.rotationDidExitFirst && state.rotationDidExitFirst.toSymbol === symbol)) && raceHorsePolicy.incrementSessionRotationCount) {
+            raceHorsePolicy.incrementSessionRotationCount();
+            if (state.rotationDidExitFirst) delete state.rotationDidExitFirst;
+          }
           state.assets = await fetchAssets();
           emitDashboard().catch(() => {});
         } catch (err) {
