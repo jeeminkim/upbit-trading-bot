@@ -73,6 +73,7 @@ const signalEvaluationLogger = require('./lib/signalEvaluationLogger');
 const discordBot = require('./lib/discordBot');
 const { MessageEmbed } = require('discord.js');
 const orchestrator = require('./lib/strategy/orchestrator');
+const raceHorsePolicy = require('./lib/strategy/raceHorsePolicy');
 const scalpRunner = require('./lib/scalp_independent/scalpRunner');
 const scalpState = require('./lib/scalp_independent/scalpState');
 const systemStatePersistence = require('./lib/systemStatePersistence');
@@ -521,6 +522,9 @@ app.get('/api/check-upbit', async (req, res) => {
   }
 });
 
+/** 전 엔진 공통: 이 금액 미만이면 신규 매수 전부 중단 (init보다 위에서 정의해 TDZ 방지) */
+const GLOBAL_MIN_BUYABLE_KRW = 5000;
+
 EngineStateStore.init({
   assets: null,
   prices: {},
@@ -555,7 +559,7 @@ EngineStateStore.init({
     active: false,
     reason: null,
     orderableKrw: null,
-    requiredKrw: 5000,
+    requiredKrw: GLOBAL_MIN_BUYABLE_KRW,
     since: null,
     notifiedAt: null
   }
@@ -904,13 +908,15 @@ function buildSnapshotFromOrderbook(orderbookItem, ticker, market) {
 }
 
 const MIN_ORDER_KRW = configDefault.MIN_ORDER_KRW != null ? configDefault.MIN_ORDER_KRW : 5000;
-/** 전 엔진 공통: 이 금액 미만이면 신규 매수 전부 중단 (매도/청산은 허용) */
-const GLOBAL_MIN_BUYABLE_KRW = 5000;
 
-/** 경주마 스케줄 반영 + state 동기화 (StrategyManager 단일 소스) */
+/** 경주마 스케줄 반영 + state 동기화 (StrategyManager 단일 소스). 창 종료 시 회전 카운트 리셋 */
 function updateRaceHorseState() {
+  const wasActive = state.raceHorseActive;
   StrategyManager.updateRaceHorseFromSchedule();
   state.raceHorseActive = StrategyManager.isRaceHorseActive();
+  if (wasActive && !state.raceHorseActive && raceHorsePolicy.resetSessionRotationCount) {
+    raceHorsePolicy.resetSessionRotationCount();
+  }
 }
 
 /**
@@ -1554,26 +1560,61 @@ async function runOneTick() {
       // 독립 스캘프 봇 가동 중: 메인 오케스트레이터 진입 차단 (우선권 탈취)
     } else {
       const market = 'KRW-' + orchResult.signal.symbol;
+      const symbol = orchResult.signal?.symbol || market.replace('KRW-', '');
+      const isRaceHorseTimeWindow = StrategyManager.isRaceHorseTimeWindow();
+      if (state.raceHorseActive && isRaceHorseTimeWindow && !raceHorsePolicy.isSymbolAllowedForRaceHorse(symbol)) {
+        tradeLogger.logTag('거절', '경주마: 허용 코인 아님 (BTC/ETH/SOL/XRP만)', { symbol });
+      } else {
+      const profile = scalpEngine.getProfile();
+      const positionSymbols = (state.accounts || [])
+        .filter((a) => (a.currency || '').toUpperCase() !== 'KRW' && parseFloat(a.balance || 0) > 0)
+        .map((a) => (a.currency || '').toUpperCase());
+      const holdingAllowed = (positionSymbols || []).filter((s) => raceHorsePolicy.isSymbolAllowedForRaceHorse(s));
+      let rotationBlock = false;
+      if (state.raceHorseActive && isRaceHorseTimeWindow && holdingAllowed.length > 0 && !holdingAllowed.includes(symbol)) {
+        const signalsBySymbol = { [symbol]: { signal: orchResult.signal, finalScore: orchResult.finalScore } };
+        const rankedUniverse = raceHorsePolicy.rankRaceHorseUniverse(state.scalpState, signalsBySymbol, profile?.entry_score_min ?? 4);
+        const lastEntryBySymbol = typeof orchestrator.getLastEntryBySymbol === 'function' ? orchestrator.getLastEntryBySymbol() : {};
+        const now = Date.now();
+        const holdSecondsBySymbol = {};
+        holdingAllowed.forEach((s) => { holdSecondsBySymbol[s] = (now - (lastEntryBySymbol[s] || 0)) / 1000; });
+        const getScore = (sym) => rankedUniverse.find((r) => r.symbol === sym)?.score ?? 0;
+        const bestHolding = holdingAllowed.length ? [...holdingAllowed].sort((a, b) => getScore(b) - getScore(a))[0] : null;
+        const rotCtx = { rankedUniverse, holdSecondsBySymbol, profile, scalpState: state.scalpState, accounts: state.accounts };
+        const rot = raceHorsePolicy.shouldRotateHolding(bestHolding, symbol, rotCtx);
+        if (!rot.allowed) {
+          tradeLogger.logTag('거절', '경주마: 회전 우위 부족', { from: holdingAllowed[0], to: symbol, reason: rot.reason });
+          rotationBlock = true;
+        }
+      }
+      const isRotationEnter = state.raceHorseActive && isRaceHorseTimeWindow && holdingAllowed.length > 0 && !holdingAllowed.includes(symbol) && !rotationBlock;
+      if (!rotationBlock) {
       state.assets = await fetchAssets();
       const orderableKrw = state.assets?.orderableKrw ?? 0;
       const currentPrice = state.prices[market]?.tradePrice ?? state.prices[market]?.trade_price ?? null;
       const totalCoinEval = state.assets?.evaluationKrwForCoins ?? Math.max(0, (state.assets?.totalEvaluationKrw ?? 0) - (orderableKrw || 0));
-      const isRaceHorseTimeWindow = StrategyManager.isRaceHorseTimeWindow();
-      const symbol = orchResult.signal?.symbol || market.replace('KRW-', '');
-      const { amountKrw } = scalpEngine.getBuyOrderAmountKrw({
+      const scalpStateEntry = state.scalpState && state.scalpState[market] ? state.scalpState[market] : null;
+      const raceHorseTier = (state.raceHorseActive && isRaceHorseTimeWindow)
+        ? raceHorsePolicy.evaluateRaceHorseConviction(orchResult.signal, orchResult.finalScore, scalpStateEntry)
+        : null;
+      const { amountKrw, raceHorseTier: tier, skipReason } = scalpEngine.getBuyOrderAmountKrw({
         orderableKrw,
         totalCoinEval,
         isRaceHorseMode: state.raceHorseActive,
         isRaceHorseTimeWindow,
+        raceHorseTier,
         minOrderKrw: MIN_ORDER_KRW,
         symbol
       });
-      const use50PercentOrder = state.raceHorseActive && isRaceHorseTimeWindow;
+      if (skipReason === 'RACE_HORSE_BLOCKED') {
+        tradeLogger.logTag('거절', '경주마: BLOCKED(매수 금지)', { market, tier });
+      }
+      const useRaceHorseSizing = tier === 'FULL_50' || tier === 'MEDIUM_25' || tier === 'LIGHT_10';
       const aggressiveMult = scalpEngine.getSymbolWeightMultiplier(symbol);
-      const baseKrwForOrder = amountKrw <= 0 ? 0 : (use50PercentOrder ? amountKrw : amountKrw * aggressiveMult);
+      const baseKrwForOrder = amountKrw <= 0 ? 0 : (useRaceHorseSizing ? amountKrw : amountKrw * aggressiveMult);
       let quantityKrw = baseKrwForOrder <= 0
         ? 0
-        : use50PercentOrder
+        : useRaceHorseSizing
           ? amountKrw
           : computeOrderQuantityWithMpi(market, baseKrwForOrder, currentPrice).quantityKrw;
       if (orderableKrw > 0 && quantityKrw * (1 + UPBIT_FEE_RATE) > orderableKrw) {
@@ -1620,6 +1661,7 @@ async function runOneTick() {
                   strategy_id: state.currentStrategyId
                 });
                 orchestrator.recordEntry(orchResult.signal.symbol, orchResult.chosenStrategy);
+                if (isRotationEnter && raceHorsePolicy.incrementSessionRotationCount) raceHorsePolicy.incrementSessionRotationCount();
                 state.assets = await fetchAssets();
                 emitDashboard().catch(() => {});
               } else if (!result.success) {
@@ -1660,6 +1702,7 @@ async function runOneTick() {
             strategy_id: state.currentStrategyId
           });
           orchestrator.recordEntry(orchResult.signal.symbol, orchResult.chosenStrategy);
+          if (isRotationEnter && raceHorsePolicy.incrementSessionRotationCount) raceHorsePolicy.incrementSessionRotationCount();
           state.assets = await fetchAssets();
           emitDashboard().catch(() => {});
         } catch (err) {
@@ -1676,6 +1719,8 @@ async function runOneTick() {
       } else if (quantityKrw > 0 && quantityKrw < (configDefault.MIN_ORDER_KRW || 5000)) {
         tradeLogger.logTag('거절', 'Orchestrator ENTER: 주문가능KRW 부족으로 매수 스킵 (최소주문금액 미달)', { market, quantityKrw, orderableKrw });
         if (discordBot.sendToChannel) discordBot.sendToChannel('⚠️ 잔액 부족으로 매수 건너뜀 (최소 주문금액 미달)').catch(() => {});
+      }
+      }
       }
     }
   }
