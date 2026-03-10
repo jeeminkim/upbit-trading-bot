@@ -676,7 +676,8 @@ function getModeRemainingOpts() {
       ticker,
       remainingMs: scalpEngine.getAggressiveSymbolRemainingMs(ticker) || 0
     })).filter((x) => x.remainingMs > 0),
-    relaxedRemainingMs: StrategyManager.getRelaxedModeRemainingMs()
+    relaxedRemainingMs: StrategyManager.getRelaxedModeRemainingMs(),
+    relaxedOverrideActive: StrategyManager.isRelaxedOverrideActive ? StrategyManager.isRelaxedOverrideActive() : false
   };
 }
 
@@ -1129,7 +1130,7 @@ async function runExitPipeline() {
   const scalpMarket = posByScalp?.market;
 
   for (const market of SCALP_MARKETS) {
-    if (scalpMarket === market) continue;
+    if (scalpState.isRunning && scalpMarket === market) continue;
     const currency = market.replace(/^KRW-/, '');
     const acc = accounts.find((a) => (a.currency || '').toUpperCase() === currency.toUpperCase());
     if (!acc) continue;
@@ -1635,7 +1636,9 @@ async function runOneTick() {
         TradeExecutor,
         recordTrade,
         emitDashboard,
-        sendAlert: (msg) => { if (discordBot.sendToChannel) discordBot.sendToChannel(msg).catch(() => {}); }
+        sendAlert: (msg) => { if (discordBot.sendToChannel) discordBot.sendToChannel(msg).catch(() => {}); },
+        lastEntryBySymbol: (typeof orchestrator.getLastEntryBySymbol === 'function' ? orchestrator.getLastEntryBySymbol() : {}),
+        recordEntryForCooldown: (symbol) => { if (symbol && typeof orchestrator.recordEntry === 'function') orchestrator.recordEntry(symbol, 'SCALP'); }
       });
       if (!scalpState.isRunning) EngineStateStore.update({ scalpMode: false });
     } catch (e) {
@@ -2140,7 +2143,7 @@ const initPromise = (async () => {
     },
     /** 경주마 모드 토글 — 변동성 큰 종목 스캐닝 주기 단축 */
     toggleRaceHorse: async () => {
-      StrategyManager.setRaceHorseActive(!StrategyManager.isRaceHorseActive());
+      StrategyManager.setRaceHorseActiveByUser(!StrategyManager.isRaceHorseActive());
       state.raceHorseActive = StrategyManager.isRaceHorseActive();
       emitDashboard().catch(() => {});
       return { active: state.raceHorseActive };
