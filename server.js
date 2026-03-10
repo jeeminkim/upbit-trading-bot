@@ -76,14 +76,20 @@ const EngineStateStore = require('./domain/state/EngineStateStore');
 const TradingEngine = require('./domain/trading/TradingEngine');
 const USE_SIGNAL_ENGINE = process.env.USE_SIGNAL_ENGINE === '1';
 let signalEngineFromBootstrap = null;
+let riskEngineFromBootstrap = null;
+let executionEngineFromBootstrap = null;
+let positionEngineFromBootstrap = null;
 if (USE_SIGNAL_ENGINE) {
   try {
     const { bootstrap } = require('./src/composition/bootstrap');
-    const composed = bootstrap();
+    const composed = bootstrap({ stateStore: null });
     signalEngineFromBootstrap = composed.signalEngine;
-    console.log('[Arch] SignalEngine (ScalpStrategy) 로드됨 — USE_SIGNAL_ENGINE=1');
+    riskEngineFromBootstrap = composed.riskEngine;
+    executionEngineFromBootstrap = composed.executionEngine;
+    positionEngineFromBootstrap = composed.positionEngine;
+    console.log('[Arch] SignalEngine + Risk/Execution/Position 엔진 로드됨 — USE_SIGNAL_ENGINE=1');
   } catch (e) {
-    console.warn('[Arch] bootstrap SignalEngine 로드 실패:', e?.message);
+    console.warn('[Arch] bootstrap 로드 실패:', e?.message);
   }
 }
 const geminiResolvedPath = require.resolve('./lib/gemini');
@@ -533,6 +539,8 @@ EngineStateStore.init({
   emergencyPauseUntil: null,
   geminiEnabled: true
 });
+if (executionEngineFromBootstrap) executionEngineFromBootstrap.stateStore = EngineStateStore;
+if (positionEngineFromBootstrap) positionEngineFromBootstrap.stateStore = EngineStateStore;
 const state = EngineStateStore.get();
 
 const priceHistory = {};
@@ -1364,6 +1372,15 @@ async function runOneTick() {
   await runScalpCycle();
   await runExitPipeline();
 
+  if (positionEngineFromBootstrap && state.assets) {
+    const fromPosition = positionEngineFromBootstrap.getProfitFromAssets(state.assets);
+    const fromLegacy = getProfitPct(state.assets);
+    const diff = Math.abs((fromPosition.profitPct ?? 0) - (fromLegacy ?? 0));
+    if (diff > 0.001) {
+      console.warn('[수익률 정합성] PositionEngine vs getProfitPct 불일치:', { positionEngine: fromPosition.profitPct, legacy: fromLegacy, diff });
+    }
+  }
+
   const mpiList = memeEngine.getAllMPI();
   const mpiBySymbol = {};
   (mpiList || []).forEach((p) => { mpiBySymbol[p.symbol] = p.mpi; });
@@ -1429,14 +1446,69 @@ async function runOneTick() {
         quantityKrw = Math.min(quantityKrw, Math.floor(orderableKrw * 0.99));
       }
       if (quantityKrw >= (configDefault.MIN_ORDER_KRW || 5000)) {
-        try {
-          const order = await withUpbitFailover(() => {
-            const k = getActiveUpbitKeys();
-            return TradeExecutor.placeMarketBuyByPrice(k.accessKey, k.secretKey, market, Math.round(quantityKrw), orderableKrw);
-          });
-          const price = order && (order.price != null ? order.price : order.avg_price);
-          const volume = order && (order.executed_volume != null ? order.executed_volume : order.volume);
-          recordTrade({
+        const useRiskExecution = USE_SIGNAL_ENGINE && riskEngineFromBootstrap && executionEngineFromBootstrap;
+        const decision = state.scalpState[market]?.pipeline?.decision || { side: 'LONG', market };
+        if (useRiskExecution) {
+          const riskContext = {
+            snapshot: state.lastSnapshots?.[market],
+            profile: scalpEngine.getProfile(),
+            assets: state.assets,
+            accounts: state.accounts || [],
+            budgetKrw: quantityKrw
+          };
+          const verdict = riskEngineFromBootstrap.evaluate(decision, riskContext);
+          if (!verdict.allowed) {
+            tradeLogger.logTag('Risk', 'Risk Rejected: ' + (verdict.reasons?.join(', ') || 'UNKNOWN'));
+            if (discordBot.sendToChannel) {
+              discordBot.sendToChannel('🛑 Risk Rejected: ' + (verdict.reasons?.join(', ') || 'UNKNOWN')).catch(() => {});
+            }
+          } else {
+            try {
+              const plan = { mode: 'MARKET', market, budgetKrw: Math.round(quantityKrw), slices: [{ ratio: 1, type: 'MARKET' }], maxSlippageBp: 50 };
+              const k = getActiveUpbitKeys();
+              const result = await executionEngineFromBootstrap.execute(plan, k, { orderableKrw });
+              const order = result.success ? result.order : null;
+              const price = order && (order.price != null ? order.price : order.avg_price);
+              const volume = order && (order.executed_volume != null ? order.executed_volume : order.volume);
+              if (result.success && order) {
+                recordTrade({
+                  timestamp: new Date().toISOString(),
+                  ticker: market,
+                  side: 'buy',
+                  price: price ?? 0,
+                  quantity: volume ?? 0,
+                  fee: 0,
+                  revenue: 0,
+                  net_return: 0,
+                  reason: 'ORCH_' + (orchResult.chosenStrategy || 'ENTER'),
+                  strategy_id: state.currentStrategyId
+                });
+                orchestrator.recordEntry(orchResult.signal.symbol, orchResult.chosenStrategy);
+                state.assets = await fetchAssets();
+                emitDashboard().catch(() => {});
+              } else if (!result.success) {
+                tradeLogger.logTag('에러', 'ExecutionEngine 주문 실패: ' + (result.error || ''));
+                if (discordBot.sendErrorAlert) discordBot.sendErrorAlert('매수 실패', result.error).catch(() => {});
+              }
+            } catch (err) {
+              const isInsufficient = err?.code === 'INSUFFICIENT_FUNDS_BID' || (err?.message && String(err.message).includes('INSUFFICIENT_FUNDS_BID'));
+              tradeLogger.logTag('에러', 'Orchestrator ENTER 주문 실패: ' + (err?.message || ''));
+              if (isInsufficient && discordBot.sendToChannel) {
+                discordBot.sendToChannel('⚠️ 잔액 부족으로 매수 건너뜀 (주문가능KRW 부족)').catch(() => {});
+              } else if (!isInsufficient && discordBot.sendErrorAlert) {
+                discordBot.sendErrorAlert('오케스트레이터 매수 실패', err?.message).catch(() => {});
+              }
+            }
+          }
+        } else {
+          try {
+            const order = await withUpbitFailover(() => {
+              const k = getActiveUpbitKeys();
+              return TradeExecutor.placeMarketBuyByPrice(k.accessKey, k.secretKey, market, Math.round(quantityKrw), orderableKrw);
+            });
+            const price = order && (order.price != null ? order.price : order.avg_price);
+            const volume = order && (order.executed_volume != null ? order.executed_volume : order.volume);
+            recordTrade({
             timestamp: new Date().toISOString(),
             ticker: market,
             side: 'buy',
