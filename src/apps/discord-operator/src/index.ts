@@ -343,7 +343,7 @@ async function restoreOrCreatePanelMessage(channel: any): Promise<PanelRestoreRe
   let components: ActionRowPayload[];
   const tContent = Date.now();
   try {
-    panelContent = buildPanelContent(model);
+    panelContent = buildPanelContent(model, { renderMode: 'single' });
   } catch (e) {
     panelRestoreFail('CONTENT_BUILD_FAIL', e, {});
     panelContent = getFallbackContent();
@@ -354,7 +354,7 @@ async function restoreOrCreatePanelMessage(channel: any): Promise<PanelRestoreRe
   const tComp = Date.now();
   try {
     const m = buildPanelModel({ lastUpdatedAt, panelStatus: panelStatus || undefined });
-    components = buildPanelComponents(m);
+    components = buildPanelComponents(m, { renderMode: 'single' });
   } catch (e) {
     panelRestoreFail('COMPONENTS_BUILD_FAIL', e, { willUseFallback: true });
     components = getFallbackComponents();
@@ -381,7 +381,7 @@ async function restoreOrCreatePanelMessage(channel: any): Promise<PanelRestoreRe
     lastUpdatedAt,
     panelStatus: panelStatus || (hasSavedMessage ? '복구 완료' : '새 패널 생성'),
   });
-  const finalContent = buildPanelContent(finalModel);
+  const finalContent = buildPanelContent(finalModel, { renderMode: 'single' });
 
   if (hasSavedMessage) {
     const messageId = panelData.panelMessageId!;
@@ -533,6 +533,28 @@ async function handleButton(interaction: any): Promise<void> {
     ConfirmFlow.cancel(tokenId);
     await interaction.deferUpdate().catch(() => {});
     await interaction.update({ content: '취소되었습니다.', components: [] }).catch(() => {});
+    return;
+  }
+
+  // ---------- 페이지형 UI 확장 포인트 (상위 메뉴 버튼: panel_role_A / panel_role_B / panel_role_C / panel_back_home) ----------
+  if (customId === 'panel_role_A') {
+    // TODO: render paged A — 패널 메시지 편집하여 buildPanelComponents(model, { renderMode: 'paged', activeRole: 'A' }) + buildPanelContent(..., { renderMode: 'paged', activeRole: 'A' }) 반영
+    await interaction.reply({ content: '페이지형 UI(역할 A) 전환은 준비 중입니다.', ephemeral: true }).catch(() => {});
+    return;
+  }
+  if (customId === 'panel_role_B') {
+    // TODO: render paged B — buildPanelComponents(model, { renderMode: 'paged', activeRole: 'B' })
+    await interaction.reply({ content: '페이지형 UI(역할 B) 전환은 준비 중입니다.', ephemeral: true }).catch(() => {});
+    return;
+  }
+  if (customId === 'panel_role_C') {
+    // TODO: render paged C — buildPanelComponents(model, { renderMode: 'paged', activeRole: 'C' })
+    await interaction.reply({ content: '페이지형 UI(역할 C) 전환은 준비 중입니다.', ephemeral: true }).catch(() => {});
+    return;
+  }
+  if (customId === 'panel_back_home') {
+    // TODO: render single home — buildPanelComponents(model, { renderMode: 'single' }), buildPanelContent(..., { renderMode: 'single' })
+    await interaction.reply({ content: '홈 패널 전환은 준비 중입니다.', ephemeral: true }).catch(() => {});
     return;
   }
 

@@ -2,7 +2,10 @@
  * 고정 패널 규약 — 역할/버튼/레이아웃 불변 계약
  * - 역할 A/B/C 명칭·의미 고정
  * - 버튼 customId·역할 소속·스타일 고정
- * - 렌더링은 PANEL_LAYOUT_SPEC만 기준 (자동 분할 금지)
+ *
+ * 레이아웃 분리:
+ * - ROLE_LAYOUT_IDEAL_SPEC: 역할별 "이상적인" 논리 레이아웃 (사람이 이해하는 row 구성). paged 모드에서 사용.
+ * - PANEL_LAYOUT_SPEC: 단일 메시지(single) 모드에서 실제 Discord에 뿌리는 row 배치. 최대 5 row, 자동 slice 금지.
  */
 
 import { LogUtil } from '../../../packages/core/src/LogUtil';
@@ -65,9 +68,22 @@ export interface RoleSpec {
 /** 한 Discord row = 버튼 키 배열 (최대 5개). 순서 고정. */
 export type LayoutRowSpec = ButtonKey[];
 
+/** 렌더 모드: 단일 메시지(5 row 압축) vs 페이지별(역할별 이상 레이아웃) */
+export type RenderMode = 'single' | 'paged';
+
+/** Discord 단일 메시지당 최대 ActionRow 개수 (제약 상수) */
+export const DISCORD_MAX_ROWS_PER_MESSAGE = 5;
+
+/** Discord row당 최대 버튼 개수 */
+export const DISCORD_MAX_BUTTONS_PER_ROW = 5;
+
 /** 패널 레이아웃 버전 — 변경 시 여기만 수정 */
 export const PANEL_LAYOUT_VERSION = 'ROLE_FIXED_V1';
 export const PANEL_CONTENT_VERSION = 'AUTO_TRADE_CONTROL_PANEL_V3';
+
+/** 페이지형 UI용 상위 메뉴 버튼 키 (예약). 추후 panel_role_A/B/C 클릭 시 paged 모드로 전환 시 사용 */
+export const PANEL_PAGED_MENU_KEYS = ['panel_role_A', 'panel_role_B', 'panel_role_C', 'panel_back_home'] as const;
+export type PanelPagedMenuKey = (typeof PANEL_PAGED_MENU_KEYS)[number];
 
 // ---------------------------------------------------------------------------
 // 역할 정의 (고정)
@@ -123,6 +139,25 @@ export const PANEL_ROLE_DEFINITIONS: RoleSpec[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// ROLE_LAYOUT_IDEAL_SPEC — 역할별 "이상적인" 논리 레이아웃 (Discord 5 row 제약과 무관)
+// ---------------------------------------------------------------------------
+/** 역할별 이상 레이아웃. 사람이 이해하는 논리적 row 구성. paged 모드에서 사용. */
+export const ROLE_LAYOUT_IDEAL_SPEC: Record<RoleType, LayoutRowSpec[]> = {
+  A: [
+    ['engine_start', 'engine_stop', 'current_status'],
+    ['current_pnl', 'sell_all'],
+    ['race_horse_toggle', 'relax_threshold'],
+    ['scalp_attack', 'scalp_stop'],
+    ['strategy_menu', 'current_strategy'],
+  ],
+  B: [
+    ['ai_entry_analysis', 'market_summary', 'surge_analysis', 'key_indicators', 'no_trade_diagnosis'],
+    ['recent_scalp', 'recent_fills', 'logic_suggestion', 'advisor_comment', 'daily_log_analysis'],
+  ],
+  C: [['health_check', 'emergency_control', 'api_usage', 'system_update']],
+};
+
+// ---------------------------------------------------------------------------
 // 버튼 정의 (key = custom_id, label/style 고정)
 // ---------------------------------------------------------------------------
 export const PANEL_BUTTON_DEFINITIONS: Record<ButtonKey, Omit<ButtonSpec, 'key'>> = {
@@ -154,7 +189,7 @@ export const PANEL_BUTTON_DEFINITIONS: Record<ButtonKey, Omit<ButtonSpec, 'key'>
 };
 
 // ---------------------------------------------------------------------------
-// 고정 레이아웃 (5 row × 최대 5버튼, 명시적 배치만)
+// PANEL_LAYOUT_SPEC — 단일 메시지 모드(single)에서만 사용하는 실제 Discord row 배치 (최대 5 row)
 // ---------------------------------------------------------------------------
 export const PANEL_LAYOUT_SPEC: LayoutRowSpec[] = [
   ['engine_start', 'engine_stop', 'current_status', 'current_pnl', 'sell_all'],
@@ -197,11 +232,13 @@ export function normalizeButtonId(customId: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// 검증
+// 검증 (PANEL_LAYOUT_SPEC, ROLE_LAYOUT_IDEAL_SPEC, single/paged 제약, 역할 소속 일치)
 // ---------------------------------------------------------------------------
 export function validatePanelDefinitions(): boolean {
   let ok = true;
   const definedKeys = new Set<ButtonKey>(BUTTON_KEYS);
+
+  // --- PANEL_LAYOUT_SPEC (single 모드 실제 렌더 레이아웃) ---
   const layoutKeys = new Set<ButtonKey>();
   for (const row of PANEL_LAYOUT_SPEC) {
     for (const k of row) {
@@ -229,16 +266,49 @@ export function validatePanelDefinitions(): boolean {
       ok = false;
     }
   }
-  if (PANEL_LAYOUT_SPEC.length > 5) {
-    LogUtil.logError(LOG_TAG, 'validatePanelDefinitions: more than 5 rows', { rows: PANEL_LAYOUT_SPEC.length });
+  if (PANEL_LAYOUT_SPEC.length > DISCORD_MAX_ROWS_PER_MESSAGE) {
+    LogUtil.logError(LOG_TAG, 'validatePanelDefinitions: single mode more than 5 rows', { rows: PANEL_LAYOUT_SPEC.length });
     ok = false;
   }
   for (let i = 0; i < PANEL_LAYOUT_SPEC.length; i++) {
-    if (PANEL_LAYOUT_SPEC[i].length > 5) {
+    if (PANEL_LAYOUT_SPEC[i].length > DISCORD_MAX_BUTTONS_PER_ROW) {
       LogUtil.logError(LOG_TAG, 'validatePanelDefinitions: row has more than 5 buttons', { rowIndex: i, count: PANEL_LAYOUT_SPEC[i].length });
       ok = false;
     }
   }
+
+  // --- ROLE_LAYOUT_IDEAL_SPEC (역할별 이상 레이아웃) ---
+  const roleDefMap = new Map<RoleType, RoleSpec>();
+  for (const r of PANEL_ROLE_DEFINITIONS) roleDefMap.set(r.id, r);
+  for (const roleId of ROLE_TYPES) {
+    const idealRows = ROLE_LAYOUT_IDEAL_SPEC[roleId];
+    const roleSpec = roleDefMap.get(roleId);
+    if (!roleSpec) continue;
+    const roleButtonSet = new Set<ButtonKey>(roleSpec.buttons);
+    if (idealRows.length > DISCORD_MAX_ROWS_PER_MESSAGE) {
+      LogUtil.logError(LOG_TAG, 'validatePanelDefinitions: ROLE_LAYOUT_IDEAL_SPEC row count > 5', { roleId, rows: idealRows.length });
+      ok = false;
+    }
+    for (let ri = 0; ri < idealRows.length; ri++) {
+      const row = idealRows[ri];
+      if (row.length > DISCORD_MAX_BUTTONS_PER_ROW) {
+        LogUtil.logError(LOG_TAG, 'validatePanelDefinitions: ROLE_LAYOUT_IDEAL_SPEC row buttons > 5', { roleId, rowIndex: ri, count: row.length });
+        ok = false;
+      }
+      for (const k of row) {
+        if (!definedKeys.has(k)) {
+          LogUtil.logError(LOG_TAG, 'validatePanelDefinitions: ROLE_LAYOUT_IDEAL_SPEC references undefined button key', { roleId, key: k });
+          ok = false;
+        }
+        if (!roleButtonSet.has(k)) {
+          LogUtil.logError(LOG_TAG, 'validatePanelDefinitions: ROLE_LAYOUT_IDEAL_SPEC button not in role', { roleId, key: k });
+          ok = false;
+        }
+      }
+    }
+  }
+
+  // --- 역할 소속 일치 (PANEL_ROLE_DEFINITIONS) ---
   const roleButtonSet = new Set<ButtonKey>();
   for (const role of PANEL_ROLE_DEFINITIONS) {
     for (const k of role.buttons) {
@@ -254,8 +324,18 @@ export function validatePanelDefinitions(): boolean {
       LogUtil.logWarn(LOG_TAG, 'validatePanelDefinitions: button key not in any role', { key: k });
     }
   }
+
   if (ok) LogUtil.logInfo(LOG_TAG, 'validatePanelDefinitions: OK', { layoutVersion: PANEL_LAYOUT_VERSION });
   return ok;
+}
+
+// ---------------------------------------------------------------------------
+// 패널 빌드 옵션 (렌더 모드 / 페이지형 시 활성 역할)
+// ---------------------------------------------------------------------------
+export interface BuildPanelOptions {
+  renderMode?: RenderMode;
+  /** paged 모드일 때 필수. 어떤 역할 페이지를 보여줄지 */
+  activeRole?: RoleType | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -284,9 +364,12 @@ export function buildPanelModel(options?: {
 }
 
 // ---------------------------------------------------------------------------
-// 패널 본문 (model 기반)
+// 패널 본문 (model 기반, options로 렌더 모드/현재 페이지 노출)
 // ---------------------------------------------------------------------------
-export function buildPanelContent(model: PanelModel): string {
+export function buildPanelContent(model: PanelModel, options?: BuildPanelOptions): string {
+  const renderMode = options?.renderMode ?? 'single';
+  const activeRole = options?.activeRole ?? null;
+
   const lines: string[] = [];
   lines.push(`[${model.contentVersion}]`);
   if (model.lastUpdatedAt) {
@@ -303,6 +386,11 @@ export function buildPanelContent(model: PanelModel): string {
   }
   lines.push(`패널 상태: ${model.panelStatus || '—'}`);
   lines.push(`레이아웃: ${model.layoutVersion}`);
+  lines.push(`렌더 모드: ${renderMode === 'single' ? 'SINGLE' : 'PAGED'}`);
+  if (renderMode === 'paged' && activeRole) {
+    const roleSpec = PANEL_ROLE_DEFINITIONS.find((r) => r.id === activeRole);
+    lines.push(`현재 페이지: 역할 ${activeRole} — ${roleSpec?.title ?? activeRole}`);
+  }
   lines.push('');
   for (const r of model.roles) {
     lines.push(`**${r.title}**`);
@@ -313,26 +401,52 @@ export function buildPanelContent(model: PanelModel): string {
 }
 
 // ---------------------------------------------------------------------------
-// 패널 컴포넌트 (오직 PANEL_LAYOUT_SPEC 기준, 동적 재배치 없음)
+// 패널 컴포넌트 (renderMode에 따라 PANEL_LAYOUT_SPEC 또는 ROLE_LAYOUT_IDEAL_SPEC 사용)
 // ---------------------------------------------------------------------------
 export type ActionRowPayload = { type: 1; components: { type: 2; style: number; custom_id: string; label: string }[] };
 
-export function buildPanelComponents(_model: PanelModel): ActionRowPayload[] {
+function rowSpecToActionRow(rowSpec: ButtonKey[]): ActionRowPayload | null {
+  const components: { type: 2; style: number; custom_id: string; label: string }[] = [];
+  for (const key of rowSpec) {
+    const spec = PANEL_BUTTON_DEFINITIONS[key];
+    if (!spec) continue;
+    components.push({ type: 2, style: spec.style, custom_id: key, label: spec.label });
+  }
+  if (components.length === 0) return null;
+  return { type: 1, components };
+}
+
+export function buildPanelComponents(model: PanelModel, options?: BuildPanelOptions): ActionRowPayload[] {
+  const renderMode = options?.renderMode ?? 'single';
+  const activeRole = options?.activeRole ?? null;
+
+  if (renderMode === 'single') {
+    const rows: ActionRowPayload[] = [];
+    for (const rowSpec of PANEL_LAYOUT_SPEC) {
+      const row = rowSpecToActionRow(rowSpec);
+      if (row) rows.push(row);
+      if (rows.length >= DISCORD_MAX_ROWS_PER_MESSAGE) break;
+    }
+    return rows;
+  }
+
+  if (renderMode === 'paged' && activeRole && ROLE_TYPES.includes(activeRole)) {
+    const idealRows = ROLE_LAYOUT_IDEAL_SPEC[activeRole];
+    const rows: ActionRowPayload[] = [];
+    for (const rowSpec of idealRows) {
+      const row = rowSpecToActionRow(rowSpec);
+      if (row) rows.push(row);
+      if (rows.length >= DISCORD_MAX_ROWS_PER_MESSAGE) break;
+    }
+    return rows;
+  }
+
+  // fallback: paged인데 activeRole 없거나 잘못됨 → single 레이아웃 사용
   const rows: ActionRowPayload[] = [];
   for (const rowSpec of PANEL_LAYOUT_SPEC) {
-    const components: { type: 2; style: number; custom_id: string; label: string }[] = [];
-    for (const key of rowSpec) {
-      const spec = PANEL_BUTTON_DEFINITIONS[key];
-      if (!spec) continue;
-      components.push({
-        type: 2,
-        style: spec.style,
-        custom_id: key,
-        label: spec.label,
-      });
-    }
-    if (components.length > 0) rows.push({ type: 1, components });
-    if (rows.length >= 5) break;
+    const row = rowSpecToActionRow(rowSpec);
+    if (row) rows.push(row);
+    if (rows.length >= DISCORD_MAX_ROWS_PER_MESSAGE) break;
   }
   return rows;
 }
