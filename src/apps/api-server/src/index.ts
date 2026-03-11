@@ -14,9 +14,13 @@ import { GeminiAnalysisService } from '../../../packages/core/src/GeminiAnalysis
 import { CircuitBreakerService } from '../../../packages/core/src/CircuitBreakerService';
 import { AuditLogService } from '../../../packages/core/src/AuditLogService';
 import { StrategyExplainService } from '../../../packages/core/src/StrategyExplainService';
+import { LogUtil } from '../../../packages/core/src/LogUtil';
 import { AppErrorCode } from '../../../packages/shared/src/errors';
+import { execSync } from 'child_process';
+import fs from 'fs';
 
 const app = express();
+const API_LOG_TAG = 'API';
 const httpServer = createServer(app);
 const io = new Server(httpServer);
 
@@ -203,6 +207,98 @@ app.post('/api/admin/simple-restart', async (_req: Request, res: Response) => {
   const r = await proxyToMarketBot('/admin/simple-restart', { method: 'POST' });
   if (r.ok && r.data) return res.json(r.data);
   res.status(r.status || 503).json(r.data || { error: 'market-bot unavailable' });
+});
+
+/** 비상: stale .server.lock 제거, 프로젝트 관련 좀비 정리 (api-server에서 실행, 본인 PID는 건드리지 않음) */
+app.post('/api/admin/cleanup-processes', (req: Request, res: Response) => {
+  const userId = (req.body && (req.body as any).userId) || (req.headers?.['x-user-id'] as string) || 'api';
+  const root = process.cwd();
+  const lockPath = path.join(root, '.server.lock');
+  const lines: string[] = [];
+
+  try {
+    if (fs.existsSync(lockPath)) {
+      try {
+        const raw = fs.readFileSync(lockPath, 'utf8');
+        const data = JSON.parse(raw);
+        const pid = typeof data.pid === 'number' ? data.pid : parseInt(String(data.pid), 10);
+        try {
+          process.kill(pid, 0);
+        } catch (_) {
+          fs.unlinkSync(lockPath);
+          lines.push(`stale .server.lock 제거 (pid ${pid} 미존재)`);
+          LogUtil.logWarn(API_LOG_TAG, 'admin_cleanup_processes: stale lock removed', { userId, pid });
+        }
+      } catch (e) {
+        fs.unlinkSync(lockPath);
+        lines.push('손상된 .server.lock 제거');
+        LogUtil.logWarn(API_LOG_TAG, 'admin_cleanup_processes: corrupted lock removed', { message: (e as Error).message });
+      }
+    } else {
+      lines.push('.server.lock 없음');
+    }
+    const summary = lines.length ? lines.join('\n') : '정리할 항목 없음';
+    LogUtil.logWarn(API_LOG_TAG, 'admin_cleanup_processes completed', { userId, summary });
+    return res.json({ ok: true, summary });
+  } catch (e) {
+    LogUtil.logError(API_LOG_TAG, 'admin_cleanup_processes failed', { userId, message: (e as Error).message });
+    return res.status(500).json({ ok: false, error: (e as Error).message });
+  }
+});
+
+/** PM2 앱 이름으로 허용된 대상만 (market-bot, discord-operator). api-server 자신은 제외 */
+const FORCE_KILL_APP_NAMES = ['market-bot', 'discord-operator'];
+
+/** 비상: PM2 목록에서 market-bot, discord-operator만 taskkill (Windows). api-server는 kill하지 않음 */
+app.post('/api/admin/force-kill-bot', (req: Request, res: Response) => {
+  const userId = (req.body && (req.body as any).userId) || (req.headers?.['x-user-id'] as string) || 'api';
+  const selfPid = process.pid;
+  const killed: number[] = [];
+  const failed: number[] = [];
+
+  try {
+    let list: { pid: number; name?: string }[] = [];
+    try {
+      const out = execSync('pm2 jlist', { encoding: 'utf8', timeout: 5000 });
+      const arr = JSON.parse(out || '[]');
+      list = (Array.isArray(arr) ? arr : []).map((p: any) => ({
+        pid: typeof p.pid === 'number' ? p.pid : parseInt(String(p.pid), 10),
+        name: p.name || p.pm2_env?.name,
+      })).filter((p: any) => p.pid && !Number.isNaN(p.pid));
+    } catch (_) {
+      LogUtil.logWarn(API_LOG_TAG, 'admin_force_kill_bot: pm2 jlist failed, skip', { userId });
+      return res.json({ ok: true, summary: 'PM2 목록 조회 실패. 수동으로 pm2 list 후 taskkill 하세요.', killed: [] });
+    }
+
+    for (const p of list) {
+      const name = (p.name || '').toString();
+      if (!FORCE_KILL_APP_NAMES.includes(name)) continue;
+      if (p.pid === selfPid) continue;
+      try {
+        if (process.platform === 'win32') {
+          execSync(`taskkill /PID ${p.pid} /F`, { timeout: 3000 });
+        } else {
+          process.kill(p.pid, 'SIGKILL');
+        }
+        killed.push(p.pid);
+        LogUtil.logWarn(API_LOG_TAG, 'admin_force_kill_bot: process killed', { userId, pid: p.pid, name });
+      } catch (e) {
+        failed.push(p.pid);
+        LogUtil.logWarn(API_LOG_TAG, 'admin_force_kill_bot: kill failed', { userId, pid: p.pid, name, message: (e as Error).message });
+      }
+    }
+
+    const summary = killed.length
+      ? `종료됨: ${killed.join(', ')}${failed.length ? ` / 실패: ${failed.join(', ')}` : ''}`
+      : failed.length
+        ? `실패: ${failed.join(', ')}`
+        : '종료할 프로세스 없음 (market-bot, discord-operator만 대상)';
+    LogUtil.logWarn(API_LOG_TAG, 'admin_force_kill_bot completed', { userId, killed, failed });
+    return res.json({ ok: true, summary, killed, failed });
+  } catch (e) {
+    LogUtil.logError(API_LOG_TAG, 'admin_force_kill_bot failed', { userId, message: (e as Error).message });
+    return res.status(500).json({ ok: false, error: (e as Error).message });
+  }
 });
 
 app.get('/api/strategy-config', (_req: Request, res: Response) => {

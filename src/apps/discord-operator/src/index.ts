@@ -1,33 +1,22 @@
 import path from 'path';
 require('dotenv').config({ path: path.join(process.cwd(), '.env') });
 
-// ===== DISCORD OPERATOR BOOT DIAGNOSTIC =====
-console.log('[DISCORD_BOOT] process start');
-console.log('[DISCORD_BOOT] cwd:', process.cwd());
-console.log('[DISCORD_BOOT] pid:', process.pid);
-console.log('[DISCORD_BOOT] node:', process.version);
-console.log('[DISCORD_BOOT] file:', __filename);
+// ===== DISCORD OPERATOR BOOT DIAGNOSTIC (timestamp 항상 포함) =====
+LogUtil.logInfo(LOG_TAG, 'process start', { cwd: process.cwd(), pid: process.pid, node: process.version });
 
 process.on('uncaughtException', (err) => {
-  console.error('[DISCORD_BOOT][uncaughtException]', err);
+  LogUtil.logError(LOG_TAG, 'uncaughtException', { message: (err as Error).message, stack: (err as Error).stack });
 });
 
 process.on('unhandledRejection', (err) => {
-  console.error('[DISCORD_BOOT][unhandledRejection]', err);
+  LogUtil.logError(LOG_TAG, 'unhandledRejection', { message: String(err) });
 });
 
-console.log(
-  '[DISCORD_ENV] DISCORD_TOKEN exists:',
-  !!(process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN)
-);
-console.log(
-  '[DISCORD_ENV] CHANNEL_ID exists:',
-  !!(process.env.DISCORD_OPERATOR_CHANNEL_ID || process.env.CHANNEL_ID)
-);
-console.log(
-  '[DISCORD_ENV] ADMIN_ID exists:',
-  !!(process.env.ADMIN_ID || process.env.DISCORD_ADMIN_ID)
-);
+if (LogUtil.isDebugLog()) {
+  LogUtil.logDebug(LOG_TAG, 'DISCORD_TOKEN exists: ' + !!(process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN));
+  LogUtil.logDebug(LOG_TAG, 'CHANNEL_ID exists: ' + !!(process.env.DISCORD_OPERATOR_CHANNEL_ID || process.env.CHANNEL_ID));
+  LogUtil.logDebug(LOG_TAG, 'ADMIN_ID exists: ' + !!(process.env.ADMIN_ID || process.env.DISCORD_ADMIN_ID));
+}
 
 import { Client, MessageEmbed } from 'discord.js';
 const discord = require('discord.js') as any;
@@ -37,33 +26,33 @@ import { PermissionService } from '../../../packages/core/src/PermissionService'
 import { AuditLogService } from '../../../packages/core/src/AuditLogService';
 import { HealthReportService } from '../../../packages/core/src/HealthReportService';
 import { ConfirmFlow } from '../../../packages/core/src/ConfirmFlow';
+import { LogUtil } from '../../../packages/core/src/LogUtil';
 import { AppErrorCode } from '../../../packages/shared/src/errors';
 import type { PermissionContext } from '../../../packages/shared/src/types';
+
+const LOG_TAG = 'DISCORD_OP';
 
 // 필수: 토큰과 채널 ID만 검증 (DISCORD_OPERATOR_CHANNEL_ID 또는 CHANNEL_ID)
 const token = (process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || '').trim();
 const channelId = (process.env.DISCORD_OPERATOR_CHANNEL_ID || process.env.CHANNEL_ID || '').trim();
 if (!token) {
-  console.error('[discord-operator] Missing required env: DISCORD_TOKEN or DISCORD_BOT_TOKEN');
+  LogUtil.logError(LOG_TAG, 'Missing required env: DISCORD_TOKEN or DISCORD_BOT_TOKEN');
   process.exit(1);
 }
 if (!channelId) {
-  console.error('[discord-operator] Missing required env: DISCORD_OPERATOR_CHANNEL_ID or CHANNEL_ID');
+  LogUtil.logError(LOG_TAG, 'Missing required env: DISCORD_OPERATOR_CHANNEL_ID or CHANNEL_ID');
   process.exit(1);
 }
-// DISCORD_CLIENT_ID 미설정 시 ready 후 client.user.id로 슬래시 명령 등록. DISCORD_GUILD_ID 미설정 시 전역 등록(즉시 반영 가능).
 if (!process.env.DISCORD_CLIENT_ID?.trim() || !process.env.DISCORD_GUILD_ID?.trim()) {
-  if (process.env.DISCORD_OPERATOR_DEBUG === '1') {
-    console.log('[discord-operator] DISCORD_CLIENT_ID/GUILD_ID 미설정 — client.user.id로 전역 슬래시 명령 등록');
-  }
+  if (process.env.DISCORD_OPERATOR_DEBUG === '1') LogUtil.logDebug(LOG_TAG, 'DISCORD_CLIENT_ID/GUILD_ID 미설정 — 전역 슬래시 명령 등록');
 }
 const adminId = (process.env.ADMIN_ID || process.env.DISCORD_ADMIN_ID || '').trim();
 const DASHBOARD_URL = (process.env.DASHBOARD_URL || process.env.API_URL || 'http://localhost:3000').replace(/\/$/, '');
 
-console.log('[DISCORD_INIT] creating client');
+LogUtil.logInfo(LOG_TAG, 'creating client');
 const client = new Client({ intents: [(Intents as any)?.FLAGS?.GUILDS ?? 1] });
 client.on('error', (err: any) => {
-  console.error('[DISCORD_ERROR]', err);
+  LogUtil.logError(LOG_TAG, 'client error', { message: (err && err.message) || String(err) });
 });
 
 let startupMessageSent = false;
@@ -221,16 +210,16 @@ async function registerSlashCommands(client: Client): Promise<void> {
     },
   ];
   if (!client.application) {
-    console.warn('[discord] client.application not ready, skip slash command registration');
+    LogUtil.logWarn(LOG_TAG, 'client.application not ready, skip slash command registration');
     return;
   }
   const guildId = process.env.DISCORD_GUILD_ID?.trim();
   if (guildId) {
     await client.application.commands.set(commands, guildId);
-    console.log('[discord] slash commands registered guild:', guildId);
+    LogUtil.logInfo(LOG_TAG, 'slash commands registered', { guildId });
   } else {
     await client.application.commands.set(commands);
-    console.log('[discord] slash commands registered global');
+    LogUtil.logInfo(LOG_TAG, 'slash commands registered global');
   }
 }
 
@@ -245,14 +234,14 @@ function scheduleHourlyHealthDm(): void {
       const report = await api<Record<string, unknown>>('/api/health');
       const embed = buildHealthEmbedFromApi(report);
       const user = await client.users.fetch(adminId).catch(() => null);
-      if (user) await user.send({ content: '1시간 헬스체크', embeds: [embed] }).catch((e) => console.warn('[discord-operator] health DM failed', e?.message));
+      if (user) await user.send({ content: '1시간 헬스체크', embeds: [embed] }).catch((e) => LogUtil.logWarn(LOG_TAG, 'health DM failed', { message: (e as Error)?.message }));
     } catch (e) {
-      console.warn('[discord-operator] health check fetch failed', (e as Error).message);
+      LogUtil.logWarn(LOG_TAG, 'health check fetch failed', { message: (e as Error).message });
     }
   }
   setInterval(runHealthCheck, ONE_HOUR_MS);
   setTimeout(runHealthCheck, ONE_HOUR_MS);
-  console.log('[discord-operator] 1시간 헬스체크 DM 예약됨');
+  LogUtil.logInfo(LOG_TAG, '1시간 헬스체크 DM 예약됨');
 }
 
 const fs = require('fs') as typeof import('fs');
@@ -291,7 +280,7 @@ function buildPanelComponents(): any[] {
         { type: 2, style: 2, custom_id: 'strategy_skip_recent', label: '최근스킵' },
         { type: 2, style: 2, custom_id: 'strategy_buy_recent', label: '최근체결' },
         { type: 2, style: 2, custom_id: 'health', label: '헬스' },
-        { type: 2, style: 2, custom_id: 'admin_simple_restart', label: '프로세스 재기동' },
+        { type: 2, style: 4, custom_id: 'admin_emergency_menu', label: '비상 제어' },
       ],
     },
     // 역할 B — Row 4: AI 타점, 시황, 급등주, 주요지표, 거래 부재 진단
@@ -334,8 +323,22 @@ function buildStrategySubmenuComponents(): any[] {
   ];
 }
 
+/** 역할 C 비상 제어 하위 메뉴: 프로세스 정리 / 강제 종료 / 프로세스 재기동 (admin_emergency_menu 클릭 시에만 표시) */
+function buildEmergencySubmenuComponents(): any[] {
+  return [
+    {
+      type: 1,
+      components: [
+        { type: 2, style: 2, custom_id: 'admin_cleanup_processes', label: '비상 프로세스 정리' },
+        { type: 2, style: 4, custom_id: 'admin_force_kill_bot', label: '강제 종료(taskkill)' },
+        { type: 2, style: 2, custom_id: 'admin_simple_restart', label: '프로세스 재기동' },
+      ],
+    },
+  ];
+}
+
 async function restorePanel(channel: any): Promise<void> {
-  console.log('[discord] startup panel restore');
+  LogUtil.logInfo(LOG_TAG, 'startup panel restore');
   let panelData: { channelId?: string; panelMessageId?: string } = {};
   try {
     if (fs.existsSync(PANEL_FILE)) {
@@ -356,21 +359,21 @@ async function restorePanel(channel: any): Promise<void> {
   if (panelData.panelMessageId) {
     try {
       msg = await channel.messages.fetch(panelData.panelMessageId);
-      console.log('[discord] startup panel found');
+      LogUtil.logInfo(LOG_TAG, 'startup panel found');
       await msg.edit({ content: panelContent, components: buildPanelComponents() });
-      console.log('[discord] startup panel updated');
+      LogUtil.logInfo(LOG_TAG, 'startup panel updated');
     } catch (_) {
       msg = await channel.send({ content: panelContent, components: buildPanelComponents() });
-      console.log('[discord] startup panel created');
+      LogUtil.logInfo(LOG_TAG, 'startup panel created');
     }
   } else {
     msg = await channel.send({ content: panelContent, components: buildPanelComponents() });
-    console.log('[discord] startup panel created');
+    LogUtil.logInfo(LOG_TAG, 'startup panel created');
   }
   try {
     fs.writeFileSync(PANEL_FILE, JSON.stringify({ channelId: channel.id, panelMessageId: msg.id }));
   } catch (e) {
-    console.warn('[discord] panel state save failed:', (e as Error).message);
+    LogUtil.logWarn(LOG_TAG, 'panel state save failed', { message: (e as Error).message });
   }
 }
 
@@ -388,9 +391,9 @@ async function sendRestartMessage(channel: any): Promise<void> {
     ].join('\n');
     await channel.send({ content: text });
     startupMessageSent = true;
-    console.log('[discord] restart notification sent');
+    LogUtil.logInfo(LOG_TAG, 'restart notification sent');
   } catch (e) {
-    console.error('[discord-operator] Restart message send failed:', (e as Error).message);
+    LogUtil.logError(LOG_TAG, 'Restart message send failed', { message: (e as Error).message });
   }
 }
 
@@ -415,9 +418,20 @@ async function handleButton(interaction: any): Promise<void> {
         const result = await api<{ success?: boolean; message?: string }>('/api/sell-all', { method: 'POST', body: { userId }, userId });
         await AuditLogService.log({ userId, command: 'sell_all', timestamp: new Date().toISOString(), success: true, approved: true, orderCreated: true });
         await interaction.update({ content: `전체 매도: ${result?.message ?? '완료'}`, components: [] }).catch(() => {});
+      } else if (consumed.command === 'admin_cleanup_processes') {
+        const result = await api<{ ok?: boolean; summary?: string; error?: string }>('/api/admin/cleanup-processes', { method: 'POST', body: { userId }, userId });
+        await AuditLogService.log({ userId, command: 'admin_cleanup_processes', timestamp: new Date().toISOString(), success: !!result?.ok });
+        LogUtil.logWarn(LOG_TAG, 'admin_cleanup_processes executed', { userId, ok: result?.ok, summary: result?.summary });
+        await interaction.update({ content: result?.summary ?? result?.error ?? '처리 완료', components: [] }).catch(() => {});
+      } else if (consumed.command === 'admin_force_kill_bot') {
+        const result = await api<{ ok?: boolean; summary?: string; killed?: number[]; error?: string }>('/api/admin/force-kill-bot', { method: 'POST', body: { userId }, userId });
+        await AuditLogService.log({ userId, command: 'admin_force_kill_bot', timestamp: new Date().toISOString(), success: !!result?.ok });
+        LogUtil.logWarn(LOG_TAG, 'admin_force_kill_bot executed', { userId, ok: result?.ok, killed: result?.killed });
+        await interaction.update({ content: result?.summary ?? result?.error ?? '처리 완료', components: [] }).catch(() => {});
       }
     } catch (e) {
       await AuditLogService.log({ userId, command: consumed.command, timestamp: new Date().toISOString(), success: false, errorCode: (e as Error).message });
+      LogUtil.logError(LOG_TAG, 'confirm flow failed', { command: consumed.command, userId, error: (e as Error).message });
       await interaction.update({ content: `오류: ${(e as Error).message}`, components: [] }).catch(() => {});
     }
     return;
@@ -757,6 +771,57 @@ async function handleButton(interaction: any): Promise<void> {
     return;
   }
 
+  // 비상 제어 하위 메뉴 진입 (역할 C)
+  if (customId === 'admin_emergency_menu') {
+    const ctxEm = PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
+    if (!PermissionService.can(ctxEm, 'admin_emergency_menu')) {
+      await interaction.reply({ content: '권한 없음 (서버 관리자 전용입니다.)', ephemeral: true }).catch(() => {});
+      return;
+    }
+    await interaction.reply({
+      content: '**비상 제어** — 프로세스 정리 / 강제 종료 / 재기동 (강제 종료·정리는 확인 후 실행)',
+      components: buildEmergencySubmenuComponents(),
+      ephemeral: true,
+    }).catch(() => {});
+    return;
+  }
+
+  // 비상 프로세스 정리 — 2단계 확인 후 실행
+  if (customId === 'admin_cleanup_processes') {
+    const ctxCp = PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
+    if (!PermissionService.can(ctxCp, 'admin_cleanup_processes')) {
+      await interaction.reply({ content: '권한 없음 (서버 관리자 전용입니다.)', ephemeral: true }).catch(() => {});
+      return;
+    }
+    const confirmToken = ConfirmFlow.create(userId, 'admin_cleanup_processes');
+    await interaction.reply({
+      content: '⚠️ **비상 프로세스 정리** — stale lock·좀비 프로세스 정리할까요? (5분 내 확인)',
+      components: [
+        { type: 1, components: [{ type: 2, style: 3, custom_id: `confirm_${confirmToken}`, label: '확인' }, { type: 2, style: 4, custom_id: `cancel_${confirmToken}`, label: '취소' }] },
+      ],
+      ephemeral: true,
+    }).catch(() => {});
+    return;
+  }
+
+  // 강제 종료(taskkill) — 2단계 확인 후 실행
+  if (customId === 'admin_force_kill_bot') {
+    const ctxFk = PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
+    if (!PermissionService.can(ctxFk, 'admin_force_kill_bot')) {
+      await interaction.reply({ content: '권한 없음 (서버 관리자 전용입니다.)', ephemeral: true }).catch(() => {});
+      return;
+    }
+    const confirmToken = ConfirmFlow.create(userId, 'admin_force_kill_bot');
+    await interaction.reply({
+      content: '⚠️ **강제 종료** — market-bot / discord-operator 프로세스를 taskkill 할까요? (5분 내 확인)',
+      components: [
+        { type: 1, components: [{ type: 2, style: 3, custom_id: `confirm_${confirmToken}`, label: '확인' }, { type: 2, style: 4, custom_id: `cancel_${confirmToken}`, label: '취소' }] },
+      ],
+      ephemeral: true,
+    }).catch(() => {});
+    return;
+  }
+
   // ——— 역할 C: 시스템 업데이트, 프로세스 재기동 (market-bot proxy) ———
   if (customId === 'admin_git_pull_restart' || customId === 'admin_simple_restart') {
     const ctxAdmin = PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
@@ -1014,7 +1079,7 @@ async function handleSlash(interaction: any): Promise<void> {
 
 // upbit-bot 메인 사용 시: 보고 권한 단일화 — 수익률/현재 상태 보고는 upbit-bot만. 여기서는 가동 완료 로그만.
 client.once('ready', async () => {
-  console.log('[discord-operator] 서비스 가동 완료');
+  LogUtil.logInfo(LOG_TAG, '서비스 가동 완료');
   await registerSlashCommands(client);
   const chId = channelId;
   if (chId) {
@@ -1024,10 +1089,10 @@ client.once('ready', async () => {
         await sendRestartMessage(channel);
         await restorePanel(channel);
       } else {
-        console.error('[discord-operator] Channel fetch failed or not text channel:', chId);
+        LogUtil.logError(LOG_TAG, 'Channel fetch failed or not text channel', { channelId: chId });
       }
     } catch (e) {
-      console.error('[discord-operator] Startup sequence failed:', (e as Error).message);
+      LogUtil.logError(LOG_TAG, 'Startup sequence failed', { message: (e as Error).message });
     }
   }
   if (adminId) scheduleHourlyHealthDm();
@@ -1043,14 +1108,14 @@ client.on('interactionCreate', async (interaction: any) => {
       await handleSlash(interaction);
     }
   } catch (e) {
-    console.error('[discord-operator]', e);
+    LogUtil.logError(LOG_TAG, 'interaction handle error', { message: (e as Error).message });
   }
 });
 
 export async function startDiscordOperator(): Promise<void> {
-  console.log('[DISCORD_LOGIN] trying login');
+  LogUtil.logInfo(LOG_TAG, 'trying login');
   await client.login(token);
-  console.log('[DISCORD_LOGIN_SUCCESS]');
+  LogUtil.logInfo(LOG_TAG, 'login success');
 }
 
 export function getClient(): Client {
@@ -1058,9 +1123,9 @@ export function getClient(): Client {
 }
 
 if (require.main === module) {
-  console.log('[DISCORD_BOOT] standalone startDiscordOperator()');
+  LogUtil.logInfo(LOG_TAG, 'standalone startDiscordOperator()');
   startDiscordOperator().catch((err) => {
-    console.error('[DISCORD_BOOT][startup_error]', err);
+    LogUtil.logError(LOG_TAG, 'startup_error', { message: (err as Error).message });
     process.exit(1);
   });
 }

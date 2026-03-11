@@ -27,6 +27,9 @@ const COMMAND_MIN_LEVEL: Record<string, PermissionLevel> = {
   // 역할 C — 서버 관리자 전용
   'admin_git_pull_restart': PermissionLevel.ADMIN,
   'admin_simple_restart': PermissionLevel.ADMIN,
+  'admin_emergency_menu': PermissionLevel.ADMIN,
+  'admin_cleanup_processes': PermissionLevel.ADMIN,
+  'admin_force_kill_bot': PermissionLevel.ADMIN,
   // 역할 A — 엔진/경주마/완화/scalp (관리자만)
   'race_horse_toggle': PermissionLevel.ADMIN,
   'relax_toggle': PermissionLevel.ADMIN,

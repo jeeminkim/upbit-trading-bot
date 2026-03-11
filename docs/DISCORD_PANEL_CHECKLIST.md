@@ -4,6 +4,20 @@ PM2 올리기 전·점검 시 이 문서와 실제 코드/동작을 대조하면
 
 ---
 
+## PM2 올리기 전 최종 7개 (이것만 보면 됨)
+
+| # | 확인 항목 | 코드 검증 |
+|---|-----------|-----------|
+| 1 | **buildPanelComponents()가 5 rows 이하인가** | ✅ `return [ Row1, Row2, Row3, Row4, Row5 ]` — 정확히 5개 row |
+| 2 | **각 row 버튼 수가 5개 이하인가** | ✅ Row1: 5개, Row2: 5개, Row3: 5개, Row4: 5개, Row5: 5개 |
+| 3 | **메인 패널에 전략 하위 4버튼이 안 보이는가** | ✅ 메인에는 `strategy_menu` 1개만 있음. SAFE/보수적/균형형/적극형은 `buildStrategySubmenuComponents()`에만 있음 |
+| 4 | **strategy_menu 클릭 시 ephemeral 전략 메뉴가 뜨는가** | ✅ `customId === 'strategy_menu'` 시 `interaction.reply({ content: '…', components: buildStrategySubmenuComponents(), ephemeral: true })` |
+| 5 | **역할 B 4개 핵심 분석 버튼이 실제 응답하는가** | ✅ AI 타점(`/api/ai_analysis`), 시황 요약(`/api/analyst/summary`), 급등주(`/api/analyst/scan-vol`), 주요지표(`/api/analyst/indicators`) — 각각 deferReply 후 editReply로 응답 |
+| 6 | **역할 C 2개 버튼이 권한 체크를 하는가** | ✅ `admin_git_pull_restart` / `admin_simple_restart` 처리 전에 `PermissionService.can(ctxAdmin, customId)` 실패 시 "권한 없음 (서버 관리자 전용입니다.)" ephemeral 반환 후 return |
+| 7 | **패널 복구(restorePanel()) 후 역할 A/B/C 설명이 예전처럼 보이는가** | ✅ `panelContent`에 역할 A/B/C 제목·설명 3줄 포함, `msg.edit()` / `channel.send()` 시 동일 content 사용 |
+
+---
+
 ## 1. 공통 체크
 
 ### A. 패널 구조

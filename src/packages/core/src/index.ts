@@ -7,6 +7,7 @@ export { AuditLogService } from './AuditLogService';
 export { HealthReportService } from './HealthReportService';
 export { TtlCache, CACHE_TTL } from './TtlCache';
 export { ConfirmFlow } from './ConfirmFlow';
+export { LogUtil } from './LogUtil';
 export { getDbSync, closeDb } from './AuditLogDb';
 export { MarketSnapshotService } from './MarketSnapshotService';
 export { GeminiAnalysisService } from './GeminiAnalysisService';
