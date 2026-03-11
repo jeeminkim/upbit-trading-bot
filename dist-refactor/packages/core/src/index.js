@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.GeminiAnalysisService = exports.MarketSnapshotService = exports.closeDb = exports.getDbSync = exports.ConfirmFlow = exports.CACHE_TTL = exports.TtlCache = exports.HealthReportService = exports.AuditLogService = exports.ProfitCalculationService = exports.PermissionService = exports.CircuitBreakerService = exports.EngineStateService = exports.EventBus = void 0;
+exports.StrategyExplainService = exports.GeminiAnalysisService = exports.MarketSnapshotService = exports.closeDb = exports.getDbSync = exports.ConfirmFlow = exports.CACHE_TTL = exports.TtlCache = exports.HealthReportService = exports.AuditLogService = exports.ProfitCalculationService = exports.PermissionService = exports.CircuitBreakerService = exports.EngineStateService = exports.EventBus = void 0;
 var EventBus_1 = require("./EventBus");
 Object.defineProperty(exports, "EventBus", { enumerable: true, get: function () { return EventBus_1.EventBus; } });
 var EngineStateService_1 = require("./EngineStateService");
@@ -27,3 +27,5 @@ var MarketSnapshotService_1 = require("./MarketSnapshotService");
 Object.defineProperty(exports, "MarketSnapshotService", { enumerable: true, get: function () { return MarketSnapshotService_1.MarketSnapshotService; } });
 var GeminiAnalysisService_1 = require("./GeminiAnalysisService");
 Object.defineProperty(exports, "GeminiAnalysisService", { enumerable: true, get: function () { return GeminiAnalysisService_1.GeminiAnalysisService; } });
+var StrategyExplainService_1 = require("./StrategyExplainService");
+Object.defineProperty(exports, "StrategyExplainService", { enumerable: true, get: function () { return StrategyExplainService_1.StrategyExplainService; } });

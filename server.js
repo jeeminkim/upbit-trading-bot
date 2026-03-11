@@ -30,19 +30,24 @@ process.on('uncaughtException', (err) => {
 
 // 이 프로세스의 디스코드 봇: DISCORD_TOKEN 또는 DISCORD_BOT_TOKEN만 사용 (매매/제어 봇 1개). MarketSearchEngine은 별도 프로세스(market_search.js)에서 MARKET_BOT_TOKEN 사용.
 const fs = require('fs');
-// 단일 인스턴스: 중복 기동 방지
+const serverLock = require('./lib/serverLock');
 const SERVER_LOCK_PATH = path.join(__dirname, '.server.lock');
 (function ensureSingleInstance() {
-  if (fs.existsSync(SERVER_LOCK_PATH)) {
-    const stat = fs.statSync(SERVER_LOCK_PATH);
-    if (Date.now() - stat.mtimeMs < 120000) {
-      console.error('[server] Another instance may be running (.server.lock). Exiting.');
-      process.exit(1);
-    }
-    try { fs.unlinkSync(SERVER_LOCK_PATH); } catch (_) {}
+  const result = serverLock.tryAcquire(SERVER_LOCK_PATH);
+  if (!result.acquired) {
+    console.error('[fatal][server] Another active instance detected. Startup aborted.', {
+      existing_pid: result.existingPid,
+      lock_file: SERVER_LOCK_PATH,
+      cwd: result.existingCwd || process.cwd(),
+    });
+    process.exit(1);
   }
-  fs.writeFileSync(SERVER_LOCK_PATH, String(process.pid));
-  process.on('exit', () => { try { fs.unlinkSync(SERVER_LOCK_PATH); } catch (_) {} });
+  function releaseLock() {
+    serverLock.release(SERVER_LOCK_PATH);
+  }
+  process.on('exit', releaseLock);
+  process.on('SIGINT', () => { releaseLock(); process.exit(0); });
+  process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
 })();
 const http = require('http');
 const express = require('express');
@@ -203,8 +208,21 @@ const apiKeys = new Proxy(apiKeysRaw, {
     return target[prop];
   }
 });
-console.log('[Check] ADMIN_ID loaded:', process.env.ADMIN_ID ? 'Yes' : 'No');
-console.log('[Check] ADMIN_DISCORD_ID (역할 C 인프라):', process.env.ADMIN_DISCORD_ID ? 'Yes' : 'No (ADMIN_ID 사용)');
+// Discord 관리자: 권한 판별은 ADMIN_ID 우선 사용 (PermissionService/discord-operator도 동일). ADMIN_DISCORD_ID는 역할 C 전용.
+const adminIdRaw = (process.env.ADMIN_ID || '').trim();
+const adminDiscordIdRaw = (process.env.ADMIN_DISCORD_ID || '').trim();
+const discordAdminIdRaw = (process.env.DISCORD_ADMIN_ID || '').trim();
+const superAdminIdRaw = (process.env.SUPER_ADMIN_ID || '').trim();
+const hasAdminId = !!(adminIdRaw || adminDiscordIdRaw || discordAdminIdRaw || superAdminIdRaw);
+if (!hasAdminId) {
+  console.warn('[config][warn] ADMIN_ID is not set.');
+  console.warn('[config][warn] Strategy mode change via Discord may not work as expected for admin-only operations.');
+  console.warn('[config][warn] Please set ADMIN_ID or ADMIN_DISCORD_ID in environment variables.');
+  console.log('[startup] ADMIN_ID loaded: No');
+} else {
+  const which = adminIdRaw ? 'ADMIN_ID' : (adminDiscordIdRaw ? 'ADMIN_DISCORD_ID' : (discordAdminIdRaw ? 'DISCORD_ADMIN_ID' : 'SUPER_ADMIN_ID'));
+  console.log('[startup] ADMIN_ID loaded: Yes (' + which + ')');
+}
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
@@ -3386,7 +3404,7 @@ const initPromise = (async () => {
     console.log('SQLite trades.db:', path.join(__dirname, 'trades.db'));
     if (MEME_PAGE_ONLY) console.log('MEME_PAGE_ONLY=1: /meme 전용 모드');
     if (ORCH_PAGE_ONLY) console.log('ORCH_PAGE_ONLY=1: /orchestrator 전용 모드');
-    tradingEngine.start(getTradingEngineCallbacks());
+    console.log('[server] 매매 엔진은 Discord/API에서 시작 버튼으로만 기동됩니다 (자동 시작 없음).');
     const cbs = getTradingEngineCallbacks();
     setTimeout(() => cbs.runMarketAnalyzerMedium().catch(() => {}), 3000);
     setTimeout(() => cbs.runMarketAnalyzerDaily().catch(() => {}), 15000);

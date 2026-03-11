@@ -58,7 +58,9 @@ export interface EmbedMeta {
 }
 
 export type EventType =
+  | 'ENGINE_START_REQUESTED'
   | 'ENGINE_STARTED'
+  | 'ENGINE_STOP_REQUESTED'
   | 'ENGINE_STOPPED'
   | 'ORDER_FILLED'
   | 'ORDER_FAILED'

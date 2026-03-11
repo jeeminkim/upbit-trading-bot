@@ -148,6 +148,7 @@ async function registerSlashCommands(): Promise<void> {
       options: [
         { type: 1, name: 'start', description: '매매 엔진 가동' },
         { type: 1, name: 'stop', description: '매매 엔진 정지 (2단계 확인)' },
+        { type: 1, name: 'status', description: '엔진 상태 조회' },
       ],
     },
     {
@@ -290,10 +291,9 @@ async function handleButton(interaction: any): Promise<void> {
     await interaction.deferUpdate().catch(() => {});
     try {
       if (consumed.command === 'engine_stop') {
-        await api('/api/engine/stop', { method: 'POST', body: { userId }, userId });
-        EventBus.emit('ENGINE_STOPPED', {});
+        const stopRes = await api<{ success?: boolean; noop?: boolean; message?: string }>('/api/engine/stop', { method: 'POST', body: { userId, updatedBy: 'discord' }, userId });
         await AuditLogService.log({ userId, command: 'engine_stop', timestamp: new Date().toISOString(), success: true, approved: true });
-        await interaction.update({ content: '엔진이 정지되었습니다.', components: [] }).catch(() => {});
+        await interaction.update({ content: stopRes?.message ?? '엔진이 정지되었습니다.', components: [] }).catch(() => {});
       } else if (consumed.command === 'sell_all') {
         const result = await api<{ success?: boolean; message?: string }>('/api/sell-all', { method: 'POST', body: { userId }, userId });
         await AuditLogService.log({ userId, command: 'sell_all', timestamp: new Date().toISOString(), success: true, approved: true, orderCreated: true });
@@ -321,9 +321,18 @@ async function handleButton(interaction: any): Promise<void> {
     strategy_active: 'A_ACTIVE',
   };
   if (strategyModeMap[customId]) {
+    const adminIdSet = !!(
+      (process.env.ADMIN_ID || '').trim() ||
+      (process.env.ADMIN_DISCORD_ID || '').trim() ||
+      (process.env.DISCORD_ADMIN_ID || '').trim() ||
+      (process.env.SUPER_ADMIN_ID || '').trim()
+    );
     const ctx = PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
     if (!PermissionService.can(ctx, 'strategy-mode')) {
-      await interaction.reply({ content: '권한 없음 (ADMIN만 전략 모드 전환이 가능합니다)', ephemeral: true }).catch(() => {});
+      const msg = !adminIdSet
+        ? '관리자 ID 미설정으로 판별 불가. .env에 ADMIN_ID 또는 ADMIN_DISCORD_ID를 설정하세요.'
+        : '권한 없음 (ADMIN만 전략 모드 전환이 가능합니다)';
+      await interaction.reply({ content: msg, ephemeral: true }).catch(() => {});
       return;
     }
     await interaction.deferReply({ ephemeral: true }).catch(() => {});
@@ -459,15 +468,24 @@ async function handleSlash(interaction: any): Promise<void> {
   const full = sub ? `${name}_${sub}` : name;
 
   if (!PermissionService.can(ctx, full)) {
-    await interaction.reply({ content: `권한 없음 (${AppErrorCode.AUTH_INSUFFICIENT_ROLE})`, ephemeral: true }).catch(() => {});
+    const adminIdSet = !!(
+      (process.env.ADMIN_ID || '').trim() ||
+      (process.env.ADMIN_DISCORD_ID || '').trim() ||
+      (process.env.DISCORD_ADMIN_ID || '').trim() ||
+      (process.env.SUPER_ADMIN_ID || '').trim()
+    );
+    const isStrategyMode = name === 'strategy-mode' || full === 'strategy-mode';
+    const msg = isStrategyMode && !adminIdSet
+      ? '관리자 ID 미설정으로 판별 불가. .env에 ADMIN_ID 또는 ADMIN_DISCORD_ID를 설정하세요.'
+      : `권한 없음 (${AppErrorCode.AUTH_INSUFFICIENT_ROLE})`;
+    await interaction.reply({ content: msg, ephemeral: true }).catch(() => {});
     return;
   }
   await interaction.deferReply({ ephemeral: true }).catch(() => {});
 
   try {
     if (name === 'engine' && sub === 'start') {
-      const result = await api<{ success?: boolean; message?: string }>('/api/engine/start', { method: 'POST', body: { userId }, userId });
-      EventBus.emit('ENGINE_STARTED', {});
+      const result = await api<{ success?: boolean; noop?: boolean; message?: string }>('/api/engine/start', { method: 'POST', body: { userId, updatedBy: 'discord' }, userId });
       await AuditLogService.log({ userId, command: 'engine_start', timestamp: new Date().toISOString(), success: !!result?.success });
       await interaction.editReply({ content: result?.message ?? '엔진 가동 요청됨' }).catch(() => {});
     } else if (name === 'engine' && sub === 'stop') {
@@ -485,6 +503,12 @@ async function handleSlash(interaction: any): Promise<void> {
         ],
       }).catch(() => {});
       await AuditLogService.log({ userId, command: 'engine_stop', timestamp: new Date().toISOString(), success: true });
+    } else if (name === 'engine' && sub === 'status') {
+      const data = await api<{ status?: string; startedAt?: string | null; stoppedAt?: string | null; updatedBy?: string; runtimeMode?: string | null }>('/api/engine-status');
+      const started = data.startedAt ? new Date(data.startedAt).toLocaleString() : '—';
+      const stopped = data.stoppedAt ? new Date(data.stoppedAt).toLocaleString() : '—';
+      const line = `**엔진 상태:** ${data.status ?? '—'}\n시작: ${started}\n정지: ${stopped}\n변경 주체: ${data.updatedBy ?? '—'}\n전략 모드: ${data.runtimeMode ?? '—'}`;
+      await interaction.editReply({ content: line }).catch(() => {});
     } else if (name === 'sell' && sub === 'all') {
       const confirmToken = ConfirmFlow.create(userId, 'sell_all');
       await interaction.editReply({

@@ -5,6 +5,7 @@ import express, { Request, Response } from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { EngineStateService } from '../../../packages/core/src/EngineStateService';
+import { EngineControlService } from '../../../packages/core/src/EngineControlService';
 import { ProfitCalculationService } from '../../../packages/core/src/ProfitCalculationService';
 import { EventBus } from '../../../packages/core/src/EventBus';
 import { HealthReportService } from '../../../packages/core/src/HealthReportService';
@@ -33,9 +34,23 @@ async function getServer(): Promise<any> {
 app.use(express.json());
 app.use(express.static(path.join(process.cwd(), 'public')));
 
+function getAdminConfigStatus(): { adminConfigPresent: boolean; adminConfigWarning: string | null } {
+  const present = !!(
+    (process.env.ADMIN_ID || '').trim() ||
+    (process.env.ADMIN_DISCORD_ID || '').trim() ||
+    (process.env.DISCORD_ADMIN_ID || '').trim() ||
+    (process.env.SUPER_ADMIN_ID || '').trim()
+  );
+  return {
+    adminConfigPresent: present,
+    adminConfigWarning: present ? null : 'ADMIN_ID or ADMIN_DISCORD_ID is not set. Strategy mode change via Discord may not work for admin-only operations.',
+  };
+}
+
 app.get('/api/health', (_req: Request, res: Response) => {
   const report = HealthReportService.build('api-server', { upbitAuthOk: true, discordConnected: true });
-  res.json(report);
+  const admin = getAdminConfigStatus();
+  res.json({ ...report, adminConfigPresent: admin.adminConfigPresent, adminConfigWarning: admin.adminConfigWarning });
 });
 
 app.get('/api/dashboard', (_req: Request, res: Response) => {
@@ -78,20 +93,55 @@ app.get('/api/pnl', async (_req: Request, res: Response) => {
   }
 });
 
+app.get('/api/engine-status', (_req: Request, res: Response) => {
+  const ctrl = EngineControlService.getState();
+  const strategyState = runtimeStrategyConfig.getState();
+  res.json({
+    status: ctrl.status,
+    startedAt: ctrl.startedAt,
+    stoppedAt: ctrl.stoppedAt,
+    updatedBy: ctrl.updatedBy,
+    lastReason: ctrl.lastReason,
+    runtimeMode: strategyState?.mode ?? null,
+  });
+});
+
 app.post('/api/engine/start', async (req: Request, res: Response) => {
   const userId = (req.body && req.body.userId) || (req.headers?.['x-user-id'] as string) || 'api';
+  const updatedBy = (req.body && req.body.updatedBy) || userId;
   try {
+    const result = EngineControlService.startEngine(updatedBy);
+    if (result.noop) {
+      await AuditLogService.log({
+        userId,
+        command: 'engine_start',
+        timestamp: new Date().toISOString(),
+        success: true,
+      });
+      return res.json({ success: true, noop: true, message: result.message });
+    }
     const s = await getServer();
-    const result = await s.discordHandlers.engineStart();
-    if (result && result.success) EngineStateService.setBotEnabled(true);
+    const serverResult = await s.discordHandlers.engineStart();
+    if (serverResult && !serverResult.success) {
+      EngineControlService.stopEngine('system');
+      await AuditLogService.log({
+        userId,
+        command: 'engine_start',
+        timestamp: new Date().toISOString(),
+        success: false,
+        errorCode: serverResult.message || 'engineStart failed',
+      });
+      return res.json(serverResult);
+    }
     await AuditLogService.log({
       userId,
       command: 'engine_start',
       timestamp: new Date().toISOString(),
-      success: !!(result && result.success),
+      success: true,
     });
-    res.json(result || { success: false, message: 'Unknown' });
+    res.json({ success: true, message: result.message });
   } catch (e) {
+    EngineControlService.stopEngine('system');
     await AuditLogService.log({
       userId,
       command: 'engine_start',
@@ -105,17 +155,27 @@ app.post('/api/engine/start', async (req: Request, res: Response) => {
 
 app.post('/api/engine/stop', async (req: Request, res: Response) => {
   const userId = (req.body && req.body.userId) || (req.headers?.['x-user-id'] as string) || 'api';
+  const updatedBy = (req.body && req.body.updatedBy) || userId;
   try {
+    const result = EngineControlService.stopEngine(updatedBy);
+    if (result.noop) {
+      await AuditLogService.log({
+        userId,
+        command: 'engine_stop',
+        timestamp: new Date().toISOString(),
+        success: true,
+      });
+      return res.json({ success: true, noop: true, message: result.message });
+    }
     const s = await getServer();
     s.discordHandlers.engineStop();
-    EngineStateService.setBotEnabled(false);
     await AuditLogService.log({
       userId,
       command: 'engine_stop',
       timestamp: new Date().toISOString(),
       success: true,
     });
-    res.json({ success: true, message: '엔진 정지됨' });
+    res.json({ success: true, message: result.message || '엔진 정지됨' });
   } catch (e) {
     await AuditLogService.log({
       userId,
@@ -403,14 +463,21 @@ async function buildConsoleSegments(): Promise<{
   const explainRecent = StrategyExplainService.getRecent(80);
   const strategyConfigState = runtimeStrategyConfig.getState();
 
+  const adminStatus = getAdminConfigStatus();
+  const engineCtrl = EngineControlService.getState();
   const system_status = {
-    engine: engineState.botEnabled ? 'running' : 'stopped',
+    engine: engineCtrl.status,
+    engineStartedAt: engineCtrl.startedAt,
+    engineStoppedAt: engineCtrl.stoppedAt,
+    engineUpdatedBy: engineCtrl.updatedBy,
     marketData: circuitUpbit === 'CLOSED' ? 'healthy' : circuitUpbit === 'OPEN' ? 'unhealthy' : 'degraded',
     exchange: health.upbitAuthOk ? 'connected' : 'disconnected',
     latencyMs: null as number | null,
     circuitBreaker: circuitUpbit === 'CLOSED' && circuitGemini === 'CLOSED' ? 'normal' : `${circuitUpbit}/${circuitGemini}`,
     uptimeSec: health.uptimeSec,
     lastOrderAt: engineState.lastOrderAt,
+    adminConfigPresent: adminStatus.adminConfigPresent,
+    adminConfigWarning: adminStatus.adminConfigWarning,
   };
 
   const market_state = {
@@ -615,14 +682,17 @@ const PORT = Number(process.env.PORT) || 3000;
 
 httpServer.on('error', (err: NodeJS.ErrnoException) => {
   if (err.code === 'EADDRINUSE') {
-    console.error(`[api-server] Port ${PORT} already in use. Stop the other process (e.g. upbit-bot or another api-server) or set PORT=3001 in .env`);
-    process.exit(0);
+    console.error('[fatal][api-server] Port ' + PORT + ' already in use. Stop the other process (e.g. upbit-bot or another api-server) or set PORT=3001 in .env');
+    process.exit(1);
   }
   throw err;
 });
 
 httpServer.listen(PORT, () => {
   console.log(`[api-server] http://localhost:${PORT}`);
+  const adminStatus = getAdminConfigStatus();
+  const strategyState = runtimeStrategyConfig.getState();
+  console.log('[startup] app=api-server port=' + PORT + ' ADMIN_ID loaded: ' + (adminStatus.adminConfigPresent ? 'Yes' : 'No') + ' runtimeMode=' + (strategyState?.mode || '—') + ' lockFile=.server.lock');
   try {
     require('../../trading-engine/src/index');
     console.log('[api-server] trading-engine loaded');

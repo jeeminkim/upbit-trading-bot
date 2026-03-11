@@ -7,9 +7,9 @@ import { HealthReportService } from '../../../packages/core/src/HealthReportServ
 
 const CYCLE_MS = 1000;
 
-// 기존 server.js 실동작: fetchAssets, runScalpCycle, state 연동
 const serverPath = path.join(process.cwd(), 'server.js');
 let serverModule: any = null;
+let cycleTimer: ReturnType<typeof setInterval> | null = null;
 
 async function getServer(): Promise<any> {
   if (!serverModule) {
@@ -41,7 +41,6 @@ async function runCycle(): Promise<void> {
       botEnabled: s.state.botEnabled,
       lastOrderAt: (s.state as any).lastOrderAt ?? null,
     };
-    // FIX: DASHBOARD_EMIT은 socket.io용. Discord 채널에는 보내지 않음 (status는 discord-operator ready 시 1회만).
     EventBus.emit('DASHBOARD_EMIT', { lastEmit });
   } catch (e) {
     HealthReportService.recordError();
@@ -53,6 +52,24 @@ async function runCycle(): Promise<void> {
   }
 }
 
+function startLoop(): void {
+  if (cycleTimer != null) return;
+  cycleTimer = setInterval(runCycle, CYCLE_MS);
+  runCycle();
+  console.log('[trading-engine] cycle started (explicit start)');
+}
+
+function stopLoop(): void {
+  if (cycleTimer != null) {
+    clearInterval(cycleTimer);
+    cycleTimer = null;
+  }
+  console.log('[trading-engine] cycle stopped');
+}
+
+EventBus.subscribe('ENGINE_STARTED', () => startLoop());
+EventBus.subscribe('ENGINE_STOPPED', () => stopLoop());
+
 export function syncBotEnabledFromEngine(enabled: boolean): void {
   getServer()
     .then((s) => {
@@ -61,7 +78,4 @@ export function syncBotEnabledFromEngine(enabled: boolean): void {
     .catch(() => {});
 }
 
-setInterval(runCycle, CYCLE_MS);
-runCycle();
-
-console.log('[trading-engine] cycle started (server.js fetchAssets + runScalpCycle)');
+console.log('[trading-engine] loaded (cycle starts only on ENGINE_STARTED)');

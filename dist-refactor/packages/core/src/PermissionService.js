@@ -5,6 +5,7 @@ const types_1 = require("../../shared/src/types");
 const COMMAND_MIN_LEVEL = {
     'engine_start': types_1.PermissionLevel.ADMIN,
     'engine_stop': types_1.PermissionLevel.ADMIN,
+    'engine_status': types_1.PermissionLevel.VIEWER,
     'sell_all': types_1.PermissionLevel.ADMIN,
     'cancel_all_orders': types_1.PermissionLevel.ADMIN,
     'current_state': types_1.PermissionLevel.VIEWER,
@@ -19,6 +20,12 @@ const COMMAND_MIN_LEVEL = {
     'analyst_major_indicators': types_1.PermissionLevel.ANALYST,
     'ai_analysis': types_1.PermissionLevel.ANALYST,
     'health': types_1.PermissionLevel.VIEWER,
+    'strategy-mode': types_1.PermissionLevel.ADMIN,
+    'strategy_status': types_1.PermissionLevel.VIEWER,
+    'strategy-status': types_1.PermissionLevel.VIEWER,
+    'strategy_explain_recent': types_1.PermissionLevel.VIEWER,
+    'strategy-explain-recent': types_1.PermissionLevel.VIEWER,
+    'strategy-skip-top': types_1.PermissionLevel.VIEWER,
 };
 const userRateCount = new Map();
 const RATE_LIMIT_PER_MIN = 15;

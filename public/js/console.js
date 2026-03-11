@@ -21,11 +21,24 @@
   socket.on('console:system_status', function (d) {
     if (!d) return;
     setText('sys-engine', d.engine ?? '—');
+    if ($('sys-engine-started')) setText('sys-engine-started', d.engineStartedAt ? new Date(d.engineStartedAt).toLocaleString() : '—');
+    if ($('sys-engine-stopped')) setText('sys-engine-stopped', d.engineStoppedAt ? new Date(d.engineStoppedAt).toLocaleString() : '—');
+    if ($('sys-engine-updated-by')) setText('sys-engine-updated-by', d.engineUpdatedBy ?? '—');
     setText('sys-market', d.marketData ?? '—');
     setText('sys-exchange', d.exchange ?? '—');
     setText('sys-latency', d.latencyMs != null ? d.latencyMs + 'ms' : '—');
     setText('sys-circuit', d.circuitBreaker ?? '—');
     setText('sys-uptime', d.uptimeSec != null ? d.uptimeSec + 's' : '—');
+    var adminEl = $('sys-admin-warn');
+    if (adminEl) {
+      if (d.adminConfigWarning) {
+        adminEl.textContent = '⚠ ' + d.adminConfigWarning;
+        adminEl.classList.remove('hidden');
+      } else {
+        adminEl.textContent = '';
+        adminEl.classList.add('hidden');
+      }
+    }
   });
 
   socket.on('console:market_state', function (d) {

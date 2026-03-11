@@ -3,6 +3,7 @@ import { PermissionLevel, type PermissionContext } from '../../shared/src/types'
 const COMMAND_MIN_LEVEL: Record<string, PermissionLevel> = {
   'engine_start': PermissionLevel.ADMIN,
   'engine_stop': PermissionLevel.ADMIN,
+  'engine_status': PermissionLevel.VIEWER,
   'sell_all': PermissionLevel.ADMIN,
   'cancel_all_orders': PermissionLevel.ADMIN,
   'current_state': PermissionLevel.VIEWER,
