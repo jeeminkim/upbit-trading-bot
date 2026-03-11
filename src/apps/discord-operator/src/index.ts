@@ -58,6 +58,9 @@ if (!process.env.DISCORD_CLIENT_ID?.trim() || !process.env.DISCORD_GUILD_ID?.tri
   if (process.env.DISCORD_OPERATOR_DEBUG === '1') LogUtil.logDebug(LOG_TAG, 'DISCORD_CLIENT_ID/GUILD_ID 미설정 — 전역 슬래시 명령 등록');
 }
 const adminId = (process.env.ADMIN_ID || process.env.DISCORD_ADMIN_ID || '').trim();
+
+// 고정 패널 규약 검증 — 앱 시작 시 1회. 오류 시 경고 후 fallback 레이아웃 사용
+validatePanelDefinitions();
 const DASHBOARD_URL = (process.env.DASHBOARD_URL || process.env.API_URL || 'http://localhost:3000').replace(/\/$/, '');
 
 LogUtil.logInfo(LOG_TAG, 'creating client');
@@ -258,146 +261,17 @@ function scheduleHourlyHealthDm(): void {
 const fs = require('fs') as typeof import('fs');
 const PANEL_FILE = path.join(process.cwd(), 'state', 'discord-panel.json');
 
-// --- 패널 UI 모델: 역할 기반 선언형 정의 (1=PRIMARY, 2=SECONDARY, 3=SUCCESS, 4=DANGER) ---
-const DISCORD_BUTTON_STYLE = { PRIMARY: 1, SECONDARY: 2, SUCCESS: 3, DANGER: 4 } as const;
-
-interface PanelButtonSpec {
-  custom_id: string;
-  label: string;
-  style: 1 | 2 | 3 | 4;
-}
-
-interface PanelRoleSpec {
-  id: string;
-  title: string;
-  description: string;
-  buttons: PanelButtonSpec[];
-}
-
-/** 역할별 버튼 정의 — 순서대로 row에 채워짐. row 배치는 ROW_LAYOUT으로 제어 */
-const PANEL_ROLES: PanelRoleSpec[] = [
-  {
-    id: 'A',
-    title: '역할 A — 현장 지휘관',
-    description: '엔진 제어 · 실시간 상태 · 체결 보고 · 공격/정지/매도',
-    buttons: [
-      { custom_id: 'engine_start', label: '엔진 가동', style: DISCORD_BUTTON_STYLE.SUCCESS },
-      { custom_id: 'engine_stop', label: '즉시 정지', style: DISCORD_BUTTON_STYLE.DANGER },
-      { custom_id: 'current_state', label: '현재 상태', style: DISCORD_BUTTON_STYLE.SECONDARY },
-      { custom_id: 'current_return', label: '현재 수익률', style: DISCORD_BUTTON_STYLE.SECONDARY },
-      { custom_id: 'sell_all', label: '전체 매도', style: DISCORD_BUTTON_STYLE.DANGER },
-      { custom_id: 'race_horse_toggle', label: '경주마 ON/OFF', style: DISCORD_BUTTON_STYLE.SECONDARY },
-      { custom_id: 'relax_toggle', label: '기준 완화', style: DISCORD_BUTTON_STYLE.SECONDARY },
-      { custom_id: 'independent_scalp_start', label: '초공격 scalp', style: DISCORD_BUTTON_STYLE.PRIMARY },
-      { custom_id: 'independent_scalp_stop', label: 'scalp 중지', style: DISCORD_BUTTON_STYLE.SECONDARY },
-      { custom_id: 'strategy_menu', label: '전략', style: DISCORD_BUTTON_STYLE.PRIMARY },
-      { custom_id: 'strategy_view_config', label: '현재전략', style: DISCORD_BUTTON_STYLE.PRIMARY },
-      { custom_id: 'strategy_skip_recent', label: '최근스킵', style: DISCORD_BUTTON_STYLE.SECONDARY },
-      { custom_id: 'strategy_buy_recent', label: '최근체결', style: DISCORD_BUTTON_STYLE.SECONDARY },
-    ],
-  },
-  {
-    id: 'B',
-    title: '역할 B — 정보 분석가',
-    description: 'AI 타점 · 시황 요약 · 급등주/주요지표 · 거래 부재 진단 · 로직 제안 · 조언 · 로그 분석',
-    buttons: [
-      { custom_id: 'ai_analysis', label: 'AI 타점 분석', style: DISCORD_BUTTON_STYLE.PRIMARY },
-      { custom_id: 'analyst_get_prompt', label: '시황 요약', style: DISCORD_BUTTON_STYLE.PRIMARY },
-      { custom_id: 'analyst_scan_vol', label: '급등주 분석', style: DISCORD_BUTTON_STYLE.SECONDARY },
-      { custom_id: 'analyst_indicators', label: '주요지표', style: DISCORD_BUTTON_STYLE.SECONDARY },
-      { custom_id: 'analyst_diagnose_no_trade', label: '거래 부재 진단', style: DISCORD_BUTTON_STYLE.SECONDARY },
-      { custom_id: 'analyst_suggest_logic', label: '로직 수정안 제안', style: DISCORD_BUTTON_STYLE.SECONDARY },
-      { custom_id: 'analyst_advisor_one_liner', label: '조언자의 한마디', style: DISCORD_BUTTON_STYLE.SECONDARY },
-      { custom_id: 'daily_log_analysis', label: '하루치 로그 분석', style: DISCORD_BUTTON_STYLE.SECONDARY },
-      { custom_id: 'api_usage_monitor', label: 'API 사용량', style: DISCORD_BUTTON_STYLE.SECONDARY },
-    ],
-  },
-  {
-    id: 'C',
-    title: '역할 C — 서버 관리자',
-    description: '시스템 업데이트 · 비상 제어 · 헬스 · 프로세스 재기동',
-    buttons: [
-      { custom_id: 'health', label: '헬스', style: DISCORD_BUTTON_STYLE.SECONDARY },
-      { custom_id: 'admin_emergency_menu', label: '비상 제어', style: DISCORD_BUTTON_STYLE.DANGER },
-      { custom_id: 'admin_git_pull_restart', label: '시스템 업데이트', style: DISCORD_BUTTON_STYLE.PRIMARY },
-    ],
-  },
-];
-
-/** 각 row를 어떤 역할·몇 개씩 채울지. 5 row × 최대 5버튼. */
-const ROW_LAYOUT: { roleId: string; count: number }[][] = [
-  [{ roleId: 'A', count: 5 }],
-  [{ roleId: 'A', count: 5 }],
-  [{ roleId: 'A', count: 3 }, { roleId: 'C', count: 2 }],
-  [{ roleId: 'B', count: 5 }],
-  [{ roleId: 'B', count: 4 }, { roleId: 'C', count: 1 }],
-];
-
-export interface PanelModel {
-  roles: PanelRoleSpec[];
-  lastUpdatedAt?: string;
-}
-
-/** UI 모델 생성 (마지막 갱신 시각 선택) */
-function buildPanelModel(lastUpdatedAt?: string): PanelModel {
-  return { roles: PANEL_ROLES, lastUpdatedAt };
-}
-
-/** 패널 메시지 content — 역할별 제목/설명 + 마지막 갱신 시각 */
-function buildPanelContent(model: PanelModel): string {
-  const lines: string[] = [];
-  if (model.lastUpdatedAt) {
-    try {
-      const d = new Date(model.lastUpdatedAt);
-      const kst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
-      const kstStr = kst.toISOString().slice(0, 19).replace('T', ' ');
-      lines.push(`🎮 **자동매매 통제 패널** · 마지막 갱신: ${kstStr} KST`);
-    } catch (_) {
-      lines.push('🎮 **자동매매 통제 패널**');
-    }
-  } else {
-    lines.push('🎮 **자동매매 통제 패널**');
-  }
-  lines.push('');
-  for (const r of model.roles) {
-    lines.push(`**${r.title}**`);
-    lines.push(r.description);
-    lines.push('');
-  }
-  return lines.join('\n').trimEnd();
-}
-
-/** 역할 인덱스 */
-const ROLE_INDEX: Record<string, number> = { A: 0, B: 1, C: 2 };
-
-/** 모델에서 Discord ActionRow[] 생성 (역할 단위 배치). 최대 5 row, row당 5버튼. */
-function buildPanelComponents(model: PanelModel): any[] {
-  const roles = model.roles;
-  const indices: Record<string, number> = { A: 0, B: 0, C: 0 };
-  const rows: any[] = [];
-  for (const rowSpec of ROW_LAYOUT) {
-    const components: any[] = [];
-    for (const { roleId, count } of rowSpec) {
-      const ri = ROLE_INDEX[roleId];
-      const role = ri != null ? roles[ri] : null;
-      if (!role) continue;
-      let idx = indices[roleId] ?? 0;
-      for (let i = 0; i < count && idx < role.buttons.length; i++, idx++) {
-        const b = role.buttons[idx];
-        components.push({ type: 2, style: b.style, custom_id: b.custom_id, label: b.label });
-      }
-      indices[roleId] = idx;
-    }
-    if (components.length > 0) rows.push({ type: 1, components });
-    if (rows.length >= 5) break;
-  }
-  return rows;
-}
-
-/** 기존 호환: model 없이 호출 시 기본 모델로 빌드 */
-function buildPanelComponentsLegacy(): any[] {
-  return buildPanelComponents(buildPanelModel());
-}
+import {
+  validatePanelDefinitions,
+  buildPanelModel,
+  buildPanelContent,
+  buildPanelComponents,
+  getFallbackContent,
+  getFallbackComponents,
+  normalizeButtonId,
+  type PanelModel,
+  type ActionRowPayload,
+} from './panelContract';
 
 /** 전략 하위 메뉴: SAFE / A-보수적 / A-균형형 / A-적극형 (strategy_menu 클릭 시에만 표시) */
 function buildStrategySubmenuComponents(): any[] {
@@ -428,46 +302,17 @@ function buildEmergencySubmenuComponents(): any[] {
   ];
 }
 
-export type PanelRestoreResult = { restored: boolean; mode?: 'edit' | 'new' };
+export interface PanelRestoreResult {
+  restored: boolean;
+  mode?: 'edit' | 'new';
+  statusText: '복구 완료' | '새 패널 생성' | '복구 실패 (로그 확인)';
+  durationMs?: number;
+}
 
-/** 패널 복구/생성: 모델 → content + components 빌드 후 edit 또는 send. 타이밍(ms)·fallback·상태 명시. */
+/** 패널 복구/생성: 고정 규약 모델 → content + components. 타이밍 세분화·fallback·상태 명시. */
 async function restoreOrCreatePanelMessage(channel: any): Promise<PanelRestoreResult> {
   const t0 = Date.now();
   const lastUpdatedAt = new Date().toISOString();
-  const model = buildPanelModel(lastUpdatedAt);
-  let panelContent: string;
-  let components: any[];
-
-  try {
-    panelContent = buildPanelContent(model);
-  } catch (e) {
-    panelRestoreFail('CONTENT_BUILD_FAIL', e, {});
-    panelContent = '🎮 **자동매매 통제 패널**\n\n(콘텐츠 생성 오류. 로그 확인.)';
-  }
-
-  try {
-    components = buildPanelComponents(model);
-  } catch (e) {
-    panelRestoreFail('COMPONENTS_BUILD_FAIL', e, { willUseFallback: true });
-    components = [{ type: 1, components: [{ type: 2, style: 2, custom_id: 'health', label: '헬스' }] }];
-  }
-
-  const rows = Array.isArray(components) ? components.length : 0;
-  const counts = Array.isArray(components)
-    ? components.map((r: any) => (Array.isArray(r?.components) ? r.components.length : 0))
-    : [];
-  const countsStr = counts.join(',');
-  const firstIds = Array.isArray(components)
-    ? components.slice(0, 2).map((r: any) => (r?.components?.[0]?.custom_id ?? '—')).join(',')
-    : '—';
-
-  const invalidRows = rows > 5 || rows === 0;
-  const invalidCounts = counts.some((c: number) => c > 5 || c === 0);
-  if (invalidRows || invalidCounts) {
-    panelRestoreFail('COMPONENTS_INVALID', new Error('rows or button count out of limit'), { rows, counts: countsStr });
-  } else {
-    panelRestoreWarn('PANEL_LAYOUT', { rows, counts: countsStr, firstIds });
-  }
 
   const tState = Date.now();
   let panelData: { channelId?: string; panelMessageId?: string; updatedAt?: string } = {};
@@ -479,22 +324,48 @@ async function restoreOrCreatePanelMessage(channel: any): Promise<PanelRestoreRe
         found: true,
         channelId: panelData.channelId,
         messageId: panelData.panelMessageId,
-        updatedAt: panelData.updatedAt ?? null,
-        stateLoadMs: Date.now() - tState,
       });
     } else {
-      panelRestoreWarn('STATE_LOADED', { found: false, reason: 'no state file', stateLoadMs: Date.now() - tState });
+      panelRestoreWarn('STATE_LOADED', { found: false, reason: 'no state file' });
     }
   } catch (e) {
     panelRestoreFail('STATE_LOAD_FAIL', e, { panelFile: PANEL_FILE });
   }
+  const stateLoadMs = Date.now() - tState;
+  panelRestoreWarn('TIMING', { stateLoadMs });
 
-  panelRestoreWarn('PANEL_RESTORE_START', {
-    channelId: channel?.id,
-    savedPanelMessageId: panelData.panelMessageId ?? null,
-    savedChannelId: panelData.channelId ?? null,
-    panelFile: PANEL_FILE,
-  });
+  const tModel = Date.now();
+  let panelStatus: PanelModel['panelStatus'] = '';
+  const model = buildPanelModel({ lastUpdatedAt, panelStatus });
+  const modelBuildMs = Date.now() - tModel;
+
+  let panelContent: string;
+  let components: ActionRowPayload[];
+  const tContent = Date.now();
+  try {
+    panelContent = buildPanelContent(model);
+  } catch (e) {
+    panelRestoreFail('CONTENT_BUILD_FAIL', e, {});
+    panelContent = getFallbackContent();
+    panelStatus = 'fallback';
+  }
+  const contentBuildMs = Date.now() - tContent;
+
+  const tComp = Date.now();
+  try {
+    const m = buildPanelModel({ lastUpdatedAt, panelStatus: panelStatus || undefined });
+    components = buildPanelComponents(m);
+  } catch (e) {
+    panelRestoreFail('COMPONENTS_BUILD_FAIL', e, { willUseFallback: true });
+    components = getFallbackComponents();
+    if (!panelStatus) panelStatus = 'fallback';
+  }
+  const componentsBuildMs = Date.now() - tComp;
+
+  const rows = components.length;
+  const counts = components.map((r) => r.components?.length ?? 0);
+  const countsStr = counts.join(',');
+  panelRestoreWarn('PANEL_LAYOUT', { rows, counts: countsStr });
 
   const dir = path.join(process.cwd(), 'state');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -506,79 +377,97 @@ async function restoreOrCreatePanelMessage(channel: any): Promise<PanelRestoreRe
     hasSavedMessage = false;
   }
 
+  const finalModel = buildPanelModel({
+    lastUpdatedAt,
+    panelStatus: panelStatus || (hasSavedMessage ? '복구 완료' : '새 패널 생성'),
+  });
+  const finalContent = buildPanelContent(finalModel);
+
   if (hasSavedMessage) {
     const messageId = panelData.panelMessageId!;
     panelRestoreWarn('FETCH_EXISTING', { channelId: channel.id, messageId });
     const tFetch = Date.now();
-    let msg: any;
+    let msg: any = null;
+    let fetchMs = 0;
     try {
       msg = await channel.messages.fetch(messageId);
-      panelRestoreWarn('FETCH_EXISTING_OK', { messageId, fetchMs: Date.now() - tFetch });
+      fetchMs = Date.now() - tFetch;
+      panelRestoreWarn('FETCH_EXISTING_OK', { messageId, fetchMs });
     } catch (e) {
-      panelRestoreFail('FETCH_EXISTING_FAIL', e, { messageId, fetchMs: Date.now() - tFetch });
+      fetchMs = Date.now() - tFetch;
+      panelRestoreFail('FETCH_EXISTING_FAIL', e as Error, { messageId, fetchMs });
       panelRestoreWarn('MESSAGE_DELETED_OR_INACCESSIBLE', { messageId, willSendNew: true });
       hasSavedMessage = false;
     }
     if (msg) {
       try {
-        panelRestoreWarn('EDIT_START', { messageId: msg.id, contentLen: panelContent.length, rows });
+        panelRestoreWarn('EDIT_START', { messageId: msg.id, contentLen: finalContent.length, rows });
         const tEdit = Date.now();
-        await msg.edit({ content: panelContent, components });
-        panelRestoreWarn('EDIT_OK', { messageId: msg.id, editMs: Date.now() - tEdit });
+        await msg.edit({ content: finalContent, components });
+        const editMs = Date.now() - tEdit;
+        panelRestoreWarn('EDIT_OK', { messageId: msg.id, editMs });
         try {
           fs.writeFileSync(PANEL_FILE, JSON.stringify({ channelId: channel.id, panelMessageId: msg.id, updatedAt: lastUpdatedAt }));
           panelRestoreWarn('STATE_SAVE_OK', { channelId: channel.id, messageId: msg.id });
         } catch (saveErr) {
-          panelRestoreFail('STATE_SAVE_FAIL', saveErr, { after: 'edit', channelId: channel.id, messageId: msg.id });
+          panelRestoreFail('STATE_SAVE_FAIL', saveErr as Error, { after: 'edit', channelId: channel.id, messageId: msg.id });
         }
+        const totalRestoreMs = Date.now() - t0;
         panelRestoreWarn('PANEL_RESTORE_DONE', {
           restored: true,
           mode: 'edit',
           panelMessageId: msg.id,
-          restoreDurationMs: Date.now() - t0,
+          stateLoadMs,
+          modelBuildMs,
+          contentBuildMs,
+          componentsBuildMs,
+          fetchMs,
+          editMs,
+          totalRestoreMs,
         });
-        return { restored: true, mode: 'edit' };
+        return { restored: true, mode: 'edit', statusText: '복구 완료', durationMs: totalRestoreMs };
       } catch (e) {
-        panelRestoreFail('EDIT_FAIL', e, { messageId: msg.id, contentLen: panelContent.length, rows });
+        panelRestoreFail('EDIT_FAIL', e, { messageId: msg.id, contentLen: finalContent.length, rows });
       }
     }
   }
 
-  panelRestoreWarn('SEND_NEW_START', { channelId: channel.id, contentLen: panelContent.length, rows });
+  panelRestoreWarn('SEND_NEW_START', { channelId: channel.id, contentLen: finalContent.length, rows });
+  const tSend = Date.now();
   try {
-    const msg = await channel.send({ content: panelContent, components });
-    panelRestoreWarn('SEND_NEW_OK', { messageId: msg.id });
+    const sent = await channel.send({ content: finalContent, components });
+    const sendMs = Date.now() - tSend;
+    panelRestoreWarn('SEND_NEW_OK', { messageId: sent.id });
     try {
-      fs.writeFileSync(PANEL_FILE, JSON.stringify({ channelId: channel.id, panelMessageId: msg.id, updatedAt: lastUpdatedAt }));
-      panelRestoreWarn('STATE_SAVE_OK', { channelId: channel.id, messageId: msg.id });
+      fs.writeFileSync(PANEL_FILE, JSON.stringify({ channelId: channel.id, panelMessageId: sent.id, updatedAt: lastUpdatedAt }));
+      panelRestoreWarn('STATE_SAVE_OK', { channelId: channel.id, messageId: sent.id });
     } catch (saveErr) {
-      panelRestoreFail('STATE_SAVE_FAIL', saveErr, { after: 'send', channelId: channel.id, messageId: msg.id });
+      panelRestoreFail('STATE_SAVE_FAIL', saveErr as Error, { after: 'send', channelId: channel.id, messageId: sent.id });
     }
+    const totalRestoreMs = Date.now() - t0;
     panelRestoreWarn('PANEL_RESTORE_DONE', {
       restored: true,
       mode: 'new',
-      panelMessageId: msg.id,
-      restoreDurationMs: Date.now() - t0,
+      panelMessageId: sent.id,
+      sendMs,
+      totalRestoreMs,
     });
-    return { restored: true, mode: 'new' };
+    return { restored: true, mode: 'new', statusText: '새 패널 생성', durationMs: totalRestoreMs };
   } catch (e) {
-    panelRestoreFail('SEND_NEW_FAIL', e, { channelId: channel.id, contentLen: panelContent.length, rows });
-    panelRestoreWarn('PANEL_RESTORE_DONE', { restored: false, reason: 'send_failed', restoreDurationMs: Date.now() - t0 });
-    return { restored: false };
+    panelRestoreFail('SEND_NEW_FAIL', e, { channelId: channel.id, contentLen: finalContent.length, rows });
+    const totalRestoreMs = Date.now() - t0;
+    panelRestoreWarn('PANEL_RESTORE_DONE', { restored: false, reason: 'send_failed', totalRestoreMs });
+    return { restored: false, statusText: '복구 실패 (로그 확인)', durationMs: totalRestoreMs };
   }
 }
 
-/** 재기동 안내 메시지. result에 따라 "패널 복구 완료 / 새 패널 생성 / 복구 실패" 명시 */
+/** 재기동 안내 메시지. result.statusText·durationMs 반영 */
 async function sendRestartMessage(channel: any, result: PanelRestoreResult): Promise<void> {
   if (startupMessageSent) return;
-  const panelStatus =
-    result.restored === false
-      ? '복구 실패 (로그 확인)'
-      : result.mode === 'edit'
-        ? '복구 완료'
-        : '새 패널 생성';
-  panelRestoreWarn('RESTART_MESSAGE', { panelRestored: result.restored, mode: result.mode, panelStatusText: panelStatus });
+  const statusText = result.statusText;
+  panelRestoreWarn('RESTART_MESSAGE', { panelRestored: result.restored, mode: result.mode, statusText, durationMs: result.durationMs });
   try {
+    const durationLine = result.durationMs != null ? `\n패널 복구 소요: ${result.durationMs} ms` : '';
     const text = [
       '🚀 **시스템 재기동 되었습니다**',
       '',
@@ -586,13 +475,13 @@ async function sendRestartMessage(channel: any, result: PanelRestoreResult): Pro
       'Market Bot       : 연결 확인',
       'API Server       : 정상',
       '',
-      `패널 상태 : ${panelStatus}`,
+      `패널 상태 : ${statusText}${durationLine}`,
     ].join('\n');
     const restartMsg = await channel.send({ content: text });
     startupMessageSent = true;
-    panelRestoreWarn('RESTART_MESSAGE_SENT', { restartMessageId: restartMsg?.id ?? null, panelRestored: result.restored, panelStatus });
+    panelRestoreWarn('RESTART_MESSAGE_SENT', { restartMessageId: restartMsg?.id ?? null, panelRestored: result.restored, statusText });
   } catch (e) {
-    panelRestoreFail('RESTART_MESSAGE_FAIL', e, { panelRestored: result.restored });
+    panelRestoreFail('RESTART_MESSAGE_FAIL', e as Error, { panelRestored: result.restored });
     LogUtil.logError(LOG_TAG, 'Restart message send failed', { message: (e as Error).message });
   }
 }
@@ -600,6 +489,8 @@ async function sendRestartMessage(channel: any, result: PanelRestoreResult): Pro
 async function handleButton(interaction: any): Promise<void> {
   const userId = interaction.user?.id ?? '';
   const customId = interaction.customId;
+  /** 레거시 customId → 표준 버튼 키. 패널 버튼은 표준 키 기준으로 분기 */
+  const key = normalizeButtonId(customId);
 
   if (customId.startsWith('confirm_')) {
     const tokenId = customId.replace('confirm_', '');
@@ -646,7 +537,7 @@ async function handleButton(interaction: any): Promise<void> {
   }
 
   // 전략 하위 메뉴: "전략" 버튼 클릭 시에만 SAFE / A-보수적 / A-균형형 / A-적극형 노출
-  if (customId === 'strategy_menu') {
+  if (key === 'strategy_menu') {
     await interaction.reply({
       content: '**전략 선택** — 아래에서 모드를 선택하세요.',
       components: buildStrategySubmenuComponents(),
@@ -656,7 +547,7 @@ async function handleButton(interaction: any): Promise<void> {
   }
 
   // 엔진 가동 버튼 (확인 없이 즉시 API 호출)
-  if (customId === 'engine_start') {
+  if (key === 'engine_start') {
     const ctx = PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
     if (!PermissionService.can(ctx, 'engine_start')) {
       await interaction.reply({ content: '권한 없음 (엔진 가동은 관리자 전용입니다.)', ephemeral: true }).catch(() => {});
@@ -678,7 +569,7 @@ async function handleButton(interaction: any): Promise<void> {
   }
 
   // 즉시 정지 — 2단계 확인
-  if (customId === 'engine_stop') {
+  if (key === 'engine_stop') {
     const ctx = PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
     if (!PermissionService.can(ctx, 'engine_stop')) {
       await interaction.reply({ content: '권한 없음 (즉시 정지는 관리자 전용입니다.)', ephemeral: true }).catch(() => {});
@@ -696,7 +587,7 @@ async function handleButton(interaction: any): Promise<void> {
   }
 
   // 전체 매도 — 2단계 확인
-  if (customId === 'sell_all') {
+  if (key === 'sell_all') {
     const ctx = PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
     if (!PermissionService.can(ctx, 'sell_all')) {
       await interaction.reply({ content: '권한 없음 (전체 매도는 관리자 전용입니다.)', ephemeral: true }).catch(() => {});
@@ -757,7 +648,7 @@ async function handleButton(interaction: any): Promise<void> {
     }
     return;
   }
-  if (customId === 'strategy_view_config') {
+  if (key === 'current_strategy') {
     await interaction.deferReply({ ephemeral: true }).catch(() => {});
     try {
       const data = await api<{ mode?: string; profile?: { description?: string }; thresholdEntry?: number; minOrchestratorScore?: number; updatedBy?: string; updatedAt?: string }>('/api/strategy-config');
@@ -770,7 +661,7 @@ async function handleButton(interaction: any): Promise<void> {
     }
     return;
   }
-  if (customId === 'strategy_skip_recent') {
+  if (key === 'recent_scalp') {
     await interaction.deferReply({ ephemeral: true }).catch(() => {});
     try {
       const data = await api<{ skipTop5?: { reason: string; count: number }[] }>('/api/strategy-status');
@@ -786,7 +677,7 @@ async function handleButton(interaction: any): Promise<void> {
     }
     return;
   }
-  if (customId === 'strategy_buy_recent') {
+  if (key === 'recent_fills') {
     await interaction.deferReply({ ephemeral: true }).catch(() => {});
     try {
       const data = await api<{ buyRecent5?: { symbol: string; time?: string; finalScore?: number; reason?: string }[] }>('/api/strategy-status');
@@ -804,7 +695,7 @@ async function handleButton(interaction: any): Promise<void> {
   }
 
   // ——— 역할 A: 경주마, 기준 완화, 초공격 scalp (market-bot proxy) ———
-  if (customId === 'race_horse_toggle') {
+  if (key === 'race_horse_toggle') {
     const ctxRh = PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
     if (!PermissionService.can(ctxRh, 'race_horse_toggle')) {
       await interaction.reply({ content: '권한 없음 (경주마 모드는 관리자 전용입니다.)', ephemeral: true }).catch(() => {});
@@ -820,7 +711,7 @@ async function handleButton(interaction: any): Promise<void> {
     }
     return;
   }
-  if (customId === 'relax_toggle') {
+  if (key === 'relax_threshold') {
     const ctxRelax = PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
     if (!PermissionService.can(ctxRelax, 'relax_toggle')) {
       await interaction.reply({ content: '권한 없음 (기준 완화는 관리자 전용입니다.)', ephemeral: true }).catch(() => {});
@@ -866,7 +757,7 @@ async function handleButton(interaction: any): Promise<void> {
     }
     return;
   }
-  if (customId === 'independent_scalp_start') {
+  if (key === 'scalp_attack') {
     const ctxScalp = PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
     if (!PermissionService.can(ctxScalp, 'independent_scalp_start')) {
       await interaction.reply({ content: '권한 없음 (초공격 scalp는 관리자 전용입니다.)', ephemeral: true }).catch(() => {});
@@ -892,7 +783,7 @@ async function handleButton(interaction: any): Promise<void> {
     }
     return;
   }
-  if (customId === 'independent_scalp_stop') {
+  if (key === 'scalp_stop') {
     const ctxScalpStop = PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
     if (!PermissionService.can(ctxScalpStop, 'independent_scalp_stop')) {
       await interaction.reply({ content: '권한 없음.', ephemeral: true }).catch(() => {});
@@ -925,7 +816,7 @@ async function handleButton(interaction: any): Promise<void> {
   }
 
   // ——— 역할 B: AI 타점, 거래 부재 진단, 로직 제안, 조언자, 일일 로그, API 사용량 (market-bot proxy) ———
-  if (customId === 'ai_analysis') {
+  if (key === 'ai_entry_analysis') {
     await interaction.deferReply({ ephemeral: true }).catch(() => {});
     try {
       const result = await api<{ content?: string }>('/api/ai_analysis');
@@ -936,16 +827,16 @@ async function handleButton(interaction: any): Promise<void> {
     }
     return;
   }
-  if (customId === 'analyst_diagnose_no_trade' || customId === 'analyst_suggest_logic') {
+  if (key === 'no_trade_diagnosis' || key === 'logic_suggestion') {
     const ctxDiag = PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
-    if (!PermissionService.can(ctxDiag, customId)) {
+    if (!PermissionService.can(ctxDiag, key)) {
       await interaction.reply({ content: '권한 없음 (거래 부재 진단/로직 제안은 관리자 전용입니다.)', ephemeral: true }).catch(() => {});
       return;
     }
     await interaction.deferReply({ ephemeral: true }).catch(() => {});
     try {
-      const path = customId === 'analyst_diagnose_no_trade' ? '/api/analyst/diagnose_no_trade' : '/api/analyst/suggest_logic';
-      const embedJson = await api<Record<string, unknown>>(path);
+      const apiPath = key === 'no_trade_diagnosis' ? '/api/analyst/diagnose_no_trade' : '/api/analyst/suggest_logic';
+      const embedJson = await api<Record<string, unknown>>(apiPath);
       const embed = new MessageEmbed(embedJson as any);
       await interaction.editReply({ embeds: [embed] }).catch(() => {});
     } catch (e) {
@@ -953,16 +844,16 @@ async function handleButton(interaction: any): Promise<void> {
     }
     return;
   }
-  if (customId === 'analyst_advisor_one_liner' || customId === 'daily_log_analysis' || customId === 'api_usage_monitor') {
+  if (key === 'advisor_comment' || key === 'daily_log_analysis' || key === 'api_usage') {
     await interaction.deferReply({ ephemeral: true }).catch(() => {});
     try {
-      const path =
-        customId === 'analyst_advisor_one_liner'
+      const apiPath =
+        key === 'advisor_comment'
           ? '/api/analyst/advisor_one_liner'
-          : customId === 'daily_log_analysis'
-          ? '/api/analyst/daily_log_analysis'
-          : '/api/analyst/api_usage_monitor';
-      const result = await api<{ content?: string }>(path);
+          : key === 'daily_log_analysis'
+            ? '/api/analyst/daily_log_analysis'
+            : '/api/analyst/api_usage_monitor';
+      const result = await api<{ content?: string }>(apiPath);
       const text = (result?.content ?? '').slice(0, 2000) || '데이터 없음';
       await interaction.editReply({ content: text }).catch(() => {});
     } catch (e) {
@@ -972,9 +863,9 @@ async function handleButton(interaction: any): Promise<void> {
   }
 
   // 비상 제어 하위 메뉴 진입 (역할 C)
-  if (customId === 'admin_emergency_menu') {
+  if (key === 'emergency_control') {
     const ctxEm = PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
-    if (!PermissionService.can(ctxEm, 'admin_emergency_menu')) {
+    if (!PermissionService.can(ctxEm, 'emergency_control')) {
       await interaction.reply({ content: '권한 없음 (서버 관리자 전용입니다.)', ephemeral: true }).catch(() => {});
       return;
     }
@@ -1023,16 +914,17 @@ async function handleButton(interaction: any): Promise<void> {
   }
 
   // ——— 역할 C: 시스템 업데이트, 프로세스 재기동 (market-bot proxy) ———
-  if (customId === 'admin_git_pull_restart' || customId === 'admin_simple_restart') {
+  if (key === 'system_update' || customId === 'admin_simple_restart') {
     const ctxAdmin = PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
-    if (!PermissionService.can(ctxAdmin, customId)) {
+    const permKey = key === 'system_update' ? 'admin_git_pull_restart' : customId;
+    if (!PermissionService.can(ctxAdmin, permKey)) {
       await interaction.reply({ content: '권한 없음 (서버 관리자 전용입니다.)', ephemeral: true }).catch(() => {});
       return;
     }
     await interaction.deferReply({ ephemeral: true }).catch(() => {});
-    const path = customId === 'admin_git_pull_restart' ? '/api/admin/git-pull-restart' : '/api/admin/simple-restart';
+    const apiPath = customId === 'admin_simple_restart' ? '/api/admin/simple-restart' : '/api/admin/git-pull-restart';
     try {
-      const result = await api<{ content?: string; ok?: boolean }>(path, { method: 'POST' });
+      const result = await api<{ content?: string; ok?: boolean }>(apiPath, { method: 'POST' });
       await interaction.editReply({ content: result?.content ?? '요청 처리됨' }).catch(() => {});
     } catch (e) {
       await interaction.editReply({ content: `오류 또는 미연동: ${(e as Error).message}` }).catch(() => {});
@@ -1040,24 +932,24 @@ async function handleButton(interaction: any): Promise<void> {
     return;
   }
 
-  // FIX: 패널 버튼(현재 상태, 수익률, 헬스, analyst) → ephemeral reply로 결과만 반환, 패널 메시지는 수정 안 함
-  const panelIds = ['current_state', 'current_return', 'health', 'analyst_scan_vol', 'analyst_get_prompt', 'analyst_indicators'];
-  if (panelIds.includes(customId)) {
+  // 패널 버튼(현재 상태, 수익률, 헬스, 분석) → ephemeral reply. 표준 키 기준 (레거시는 normalizeButtonId로 이미 반영)
+  const panelIds = ['current_status', 'current_pnl', 'health_check', 'surge_analysis', 'market_summary', 'key_indicators'];
+  if (panelIds.includes(key)) {
     await interaction.deferReply({ ephemeral: true }).catch(() => {});
     try {
-      if (customId === 'current_state') {
+      if (key === 'current_status') {
         const data = await api<any>('/api/status');
         const embed = buildStatusEmbedFromApi(data);
         await interaction.editReply({ embeds: [embed] }).catch(() => {});
-      } else if (customId === 'current_return') {
+      } else if (key === 'current_pnl') {
         const data = await api<any>('/api/pnl');
         const embed = buildPnlEmbedFromApi(data);
         await interaction.editReply({ embeds: [embed] }).catch(() => {});
-      } else if (customId === 'health') {
+      } else if (key === 'health_check') {
         const report = await api<any>('/api/health');
         const embed = buildHealthEmbedFromApi(report);
         await interaction.editReply({ embeds: [embed] }).catch(() => {});
-      } else if (customId === 'analyst_scan_vol') {
+      } else if (key === 'surge_analysis') {
         const result = await api<{ ok?: boolean; data?: { text?: string }; message?: string }>('/api/analyst/scan-vol');
         const embed = new MessageEmbed()
           .setTitle('🔍 급등주 분석')
@@ -1065,7 +957,7 @@ async function handleButton(interaction: any): Promise<void> {
           .setDescription(result?.data?.text || result?.message || '데이터 없음')
           .setTimestamp();
         await interaction.editReply({ embeds: [embed] }).catch(() => {});
-      } else if (customId === 'analyst_get_prompt') {
+      } else if (key === 'market_summary') {
         const result = await api<{ ok?: boolean; data?: { text?: string }; message?: string }>('/api/analyst/summary');
         const embed = new MessageEmbed()
           .setTitle('💡 시황 요약')
@@ -1073,7 +965,7 @@ async function handleButton(interaction: any): Promise<void> {
           .setDescription(result?.data?.text || result?.message || '데이터 없음')
           .setTimestamp();
         await interaction.editReply({ embeds: [embed] }).catch(() => {});
-      } else if (customId === 'analyst_indicators') {
+      } else if (key === 'key_indicators') {
         const result = await api<{ ok?: boolean; data?: any }>('/api/analyst/indicators');
         const d = result?.data || {};
         const lines = [
