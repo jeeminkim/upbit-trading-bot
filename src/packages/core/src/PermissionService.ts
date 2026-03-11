@@ -24,6 +24,19 @@ const COMMAND_MIN_LEVEL: Record<string, PermissionLevel> = {
   'strategy_explain_recent': PermissionLevel.VIEWER,
   'strategy-explain-recent': PermissionLevel.VIEWER,
   'strategy-skip-top': PermissionLevel.VIEWER,
+  // 역할 C — 서버 관리자 전용
+  'admin_git_pull_restart': PermissionLevel.ADMIN,
+  'admin_simple_restart': PermissionLevel.ADMIN,
+  // 역할 A — 엔진/경주마/완화/scalp (관리자만)
+  'race_horse_toggle': PermissionLevel.ADMIN,
+  'relax_toggle': PermissionLevel.ADMIN,
+  'independent_scalp_start': PermissionLevel.ADMIN,
+  'independent_scalp_stop': PermissionLevel.ADMIN,
+  'extend_relax': PermissionLevel.ADMIN,
+  'extend_independent_scalp': PermissionLevel.ADMIN,
+  // 역할 B — 진단/제안 (관리자만, legacy와 동일)
+  'analyst_diagnose_no_trade': PermissionLevel.ADMIN,
+  'analyst_suggest_logic': PermissionLevel.ADMIN,
 };
 
 const userRateCount = new Map<string, { count: number; resetAt: number }>();
@@ -38,9 +51,9 @@ export const PermissionService = {
   },
 
   resolveLevel(userId: string): PermissionLevel {
-    const superAdmin = process.env.ADMIN_ID || process.env.SUPER_ADMIN_ID || '';
+    const superAdmin = (process.env.ADMIN_ID || process.env.DISCORD_ADMIN_ID || process.env.SUPER_ADMIN_ID || '').trim();
     const admins = (process.env.ADMIN_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
-    if (superAdmin && userId === superAdmin.trim()) return PermissionLevel.SUPER_ADMIN;
+    if (superAdmin && userId === superAdmin) return PermissionLevel.SUPER_ADMIN;
     if (admins.includes(userId)) return PermissionLevel.ADMIN;
     return PermissionLevel.VIEWER;
   },

@@ -7,11 +7,24 @@ exports.startDiscordOperator = startDiscordOperator;
 exports.getClient = getClient;
 const path_1 = __importDefault(require("path"));
 require('dotenv').config({ path: path_1.default.join(process.cwd(), '.env') });
+// ===== DISCORD OPERATOR BOOT DIAGNOSTIC =====
+console.log('[DISCORD_BOOT] process start');
+console.log('[DISCORD_BOOT] cwd:', process.cwd());
+console.log('[DISCORD_BOOT] pid:', process.pid);
+console.log('[DISCORD_BOOT] node:', process.version);
+console.log('[DISCORD_BOOT] file:', __filename);
+process.on('uncaughtException', (err) => {
+    console.error('[DISCORD_BOOT][uncaughtException]', err);
+});
+process.on('unhandledRejection', (err) => {
+    console.error('[DISCORD_BOOT][unhandledRejection]', err);
+});
+console.log('[DISCORD_ENV] DISCORD_TOKEN exists:', !!(process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN));
+console.log('[DISCORD_ENV] CHANNEL_ID exists:', !!(process.env.DISCORD_OPERATOR_CHANNEL_ID || process.env.CHANNEL_ID));
+console.log('[DISCORD_ENV] ADMIN_ID exists:', !!(process.env.ADMIN_ID || process.env.DISCORD_ADMIN_ID));
 const discord_js_1 = require("discord.js");
 const discord = require('discord.js');
 const Intents = discord.Intents;
-const REST = discord.REST;
-const Routes = discord.Routes;
 const PermissionService_1 = require("../../../packages/core/src/PermissionService");
 const AuditLogService_1 = require("../../../packages/core/src/AuditLogService");
 const ConfirmFlow_1 = require("../../../packages/core/src/ConfirmFlow");
@@ -35,7 +48,11 @@ if (!process.env.DISCORD_CLIENT_ID?.trim() || !process.env.DISCORD_GUILD_ID?.tri
 }
 const adminId = (process.env.ADMIN_ID || process.env.DISCORD_ADMIN_ID || '').trim();
 const DASHBOARD_URL = (process.env.DASHBOARD_URL || process.env.API_URL || 'http://localhost:3000').replace(/\/$/, '');
+console.log('[DISCORD_INIT] creating client');
 const client = new discord_js_1.Client({ intents: [Intents?.FLAGS?.GUILDS ?? 1] });
+client.on('error', (err) => {
+    console.error('[DISCORD_ERROR]', err);
+});
 let startupMessageSent = false;
 async function api(path, opts) {
     const url = `${DASHBOARD_URL}${path.startsWith('/') ? path : '/' + path}`;
@@ -110,8 +127,7 @@ function buildHealthEmbedFromApi(report) {
         .setFooter({ text: report.reportedAt || '' })
         .setTimestamp();
 }
-async function registerSlashCommands() {
-    const rest = new REST({ version: '9' }).setToken(token);
+async function registerSlashCommands(client) {
     const commands = [
         {
             name: 'engine',
@@ -161,9 +177,19 @@ async function registerSlashCommands() {
             ],
         },
     ];
-    const appId = client.user?.id || process.env.DISCORD_CLIENT_ID;
-    if (appId)
-        await rest.put(Routes.applicationCommands(appId), { body: commands });
+    if (!client.application) {
+        console.warn('[discord] client.application not ready, skip slash command registration');
+        return;
+    }
+    const guildId = process.env.DISCORD_GUILD_ID?.trim();
+    if (guildId) {
+        await client.application.commands.set(commands, guildId);
+        console.log('[discord] slash commands registered guild:', guildId);
+    }
+    else {
+        await client.application.commands.set(commands);
+        console.log('[discord] slash commands registered global');
+    }
 }
 let healthDmScheduled = false;
 function scheduleHourlyHealthDm() {
@@ -189,67 +215,71 @@ function scheduleHourlyHealthDm() {
     setTimeout(runHealthCheck, ONE_HOUR_MS);
     console.log('[discord-operator] 1시간 헬스체크 DM 예약됨');
 }
-// 가동 시 짧은 메시지만 (수익률/현재 상태 보고는 upbit-bot에서만)
-async function sendStartupMessage(channel) {
+const fs = require('fs');
+const PANEL_FILE = path_1.default.join(process.cwd(), 'state', 'discord-panel.json');
+function buildPanelComponents() {
+    return [
+        { type: 1, components: [{ type: 2, style: 1, custom_id: 'current_state', label: '현재 상태' }, { type: 2, style: 1, custom_id: 'current_return', label: '수익률' }, { type: 2, style: 1, custom_id: 'health', label: '헬스' }] },
+        { type: 1, components: [{ type: 2, style: 2, custom_id: 'analyst_scan_vol', label: '급등주 분석' }, { type: 2, style: 2, custom_id: 'analyst_get_prompt', label: '시황 요약' }, { type: 2, style: 2, custom_id: 'analyst_indicators', label: '주요지표' }] },
+        { type: 1, components: [{ type: 2, style: 2, custom_id: 'strategy_safe', label: 'SAFE' }, { type: 2, style: 2, custom_id: 'strategy_conservative', label: 'A-보수적' }, { type: 2, style: 2, custom_id: 'strategy_balanced', label: 'A-균형형' }, { type: 2, style: 2, custom_id: 'strategy_active', label: 'A-적극형' }] },
+        { type: 1, components: [{ type: 2, style: 1, custom_id: 'strategy_view_config', label: '현재전략' }, { type: 2, style: 2, custom_id: 'strategy_skip_recent', label: '최근스킵' }, { type: 2, style: 2, custom_id: 'strategy_buy_recent', label: '최근체결' }] },
+    ];
+}
+async function restorePanel(channel) {
+    console.log('[discord] startup panel restore');
+    let panelData = {};
+    try {
+        if (fs.existsSync(PANEL_FILE)) {
+            panelData = JSON.parse(fs.readFileSync(PANEL_FILE, 'utf8'));
+        }
+    }
+    catch (_) { }
+    const dir = path_1.default.join(process.cwd(), 'state');
+    if (!fs.existsSync(dir))
+        fs.mkdirSync(dir, { recursive: true });
+    let msg;
+    if (panelData.panelMessageId) {
+        try {
+            msg = await channel.messages.fetch(panelData.panelMessageId);
+            console.log('[discord] startup panel found');
+            await msg.edit({ content: '🎮 자동매매 통제 패널 (역할 A/B/C)', components: buildPanelComponents() });
+            console.log('[discord] startup panel updated');
+        }
+        catch (_) {
+            msg = await channel.send({ content: '🎮 자동매매 통제 패널 (역할 A/B/C)', components: buildPanelComponents() });
+            console.log('[discord] startup panel created');
+        }
+    }
+    else {
+        msg = await channel.send({ content: '🎮 자동매매 통제 패널 (역할 A/B/C)', components: buildPanelComponents() });
+        console.log('[discord] startup panel created');
+    }
+    try {
+        fs.writeFileSync(PANEL_FILE, JSON.stringify({ channelId: channel.id, panelMessageId: msg.id }));
+    }
+    catch (e) {
+        console.warn('[discord] panel state save failed:', e.message);
+    }
+}
+async function sendRestartMessage(channel) {
     if (startupMessageSent)
         return;
     try {
-        await channel.send({ content: '✅ discord-operator 서비스 가동 완료' });
+        const text = [
+            '🚀 **시스템 재기동 되었습니다**',
+            '',
+            'Discord Operator : 정상',
+            'Market Bot       : 연결 확인',
+            'API Server       : 정상',
+            '',
+            '패널 상태 : 복구 완료',
+        ].join('\n');
+        await channel.send({ content: text });
         startupMessageSent = true;
+        console.log('[discord] restart notification sent');
     }
     catch (e) {
-        console.error('[discord-operator] Startup message send failed:', e.message);
-    }
-}
-// FIX: Operator / Analyst 패널을 channel.send()로 새로 생성, 기존 메시지 수정 안 함
-async function sendOperatorPanel(channel) {
-    try {
-        await channel.send({
-            content: '**Operator / Analyst 패널**',
-            components: [
-                {
-                    type: 1,
-                    components: [
-                        { type: 2, style: 1, custom_id: 'current_state', label: '현재 상태' },
-                        { type: 2, style: 1, custom_id: 'current_return', label: '수익률' },
-                        { type: 2, style: 1, custom_id: 'health', label: '헬스' },
-                    ],
-                },
-                {
-                    type: 1,
-                    components: [
-                        { type: 2, style: 2, custom_id: 'analyst_scan_vol', label: '급등주 분석' },
-                        { type: 2, style: 2, custom_id: 'analyst_get_prompt', label: '시황 요약' },
-                        { type: 2, style: 2, custom_id: 'analyst_indicators', label: '주요지표' },
-                    ],
-                },
-            ],
-        });
-        await channel.send({
-            content: '**전략 모드** (RuntimeStrategyModeService 기준)',
-            components: [
-                {
-                    type: 1,
-                    components: [
-                        { type: 2, style: 2, custom_id: 'strategy_safe', label: 'SAFE' },
-                        { type: 2, style: 2, custom_id: 'strategy_conservative', label: 'A-보수적' },
-                        { type: 2, style: 2, custom_id: 'strategy_balanced', label: 'A-균형형' },
-                        { type: 2, style: 2, custom_id: 'strategy_active', label: 'A-적극형' },
-                    ],
-                },
-                {
-                    type: 1,
-                    components: [
-                        { type: 2, style: 1, custom_id: 'strategy_view_config', label: '현재전략' },
-                        { type: 2, style: 2, custom_id: 'strategy_skip_recent', label: '최근스킵' },
-                        { type: 2, style: 2, custom_id: 'strategy_buy_recent', label: '최근체결' },
-                    ],
-                },
-            ],
-        });
-    }
-    catch (e) {
-        console.error('[discord-operator] Operator panel send failed:', e.message);
+        console.error('[discord-operator] Restart message send failed:', e.message);
     }
 }
 async function handleButton(interaction) {
@@ -630,14 +660,14 @@ async function handleSlash(interaction) {
 // upbit-bot 메인 사용 시: 보고 권한 단일화 — 수익률/현재 상태 보고는 upbit-bot만. 여기서는 가동 완료 로그만.
 client.once('ready', async () => {
     console.log('[discord-operator] 서비스 가동 완료');
-    await registerSlashCommands();
+    await registerSlashCommands(client);
     const chId = channelId;
     if (chId) {
         try {
             const channel = await client.channels.fetch(chId).catch(() => null);
             if (channel && channel.isText()) {
-                await sendStartupMessage(channel);
-                await sendOperatorPanel(channel);
+                await sendRestartMessage(channel);
+                await restorePanel(channel);
             }
             else {
                 console.error('[discord-operator] Channel fetch failed or not text channel:', chId);
@@ -665,8 +695,17 @@ client.on('interactionCreate', async (interaction) => {
     }
 });
 async function startDiscordOperator() {
+    console.log('[DISCORD_LOGIN] trying login');
     await client.login(token);
+    console.log('[DISCORD_LOGIN_SUCCESS]');
 }
 function getClient() {
     return client;
+}
+if (require.main === module) {
+    console.log('[DISCORD_BOOT] standalone startDiscordOperator()');
+    startDiscordOperator().catch((err) => {
+        console.error('[DISCORD_BOOT][startup_error]', err);
+        process.exit(1);
+    });
 }

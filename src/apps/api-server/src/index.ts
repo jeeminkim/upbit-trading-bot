@@ -20,15 +20,20 @@ const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer);
 
-const serverPath = path.join(process.cwd(), 'server.js');
-let serverModule: any = null;
+const MARKET_BOT_URL = (process.env.MARKET_BOT_URL || 'http://localhost:3001').replace(/\/$/, '');
 
-async function getServer(): Promise<any> {
-  if (!serverModule) {
-    serverModule = require(serverPath);
-    await serverModule.initPromise;
+async function proxyToMarketBot(path: string, opts?: { method?: string; body?: any }): Promise<{ ok: boolean; data?: any; status?: number }> {
+  try {
+    const res = await fetch(MARKET_BOT_URL + path, {
+      method: opts?.method || 'GET',
+      headers: opts?.body ? { 'Content-Type': 'application/json' } : undefined,
+      body: opts?.body ? JSON.stringify(opts.body) : undefined,
+    });
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok, data, status: res.status };
+  } catch (e) {
+    return { ok: false, data: { error: (e as Error).message }, status: 503 };
   }
-  return serverModule;
 }
 
 app.use(express.json());
@@ -53,164 +58,151 @@ app.get('/api/health', (_req: Request, res: Response) => {
   res.json({ ...report, adminConfigPresent: admin.adminConfigPresent, adminConfigWarning: admin.adminConfigWarning });
 });
 
-app.get('/api/dashboard', (_req: Request, res: Response) => {
-  const state = EngineStateService.getState();
-  const summary = ProfitCalculationService.getSummary(state.assets);
-  res.json({
-    assets: state.assets,
-    profitSummary: summary,
-    botEnabled: state.botEnabled,
-    lastOrderAt: state.lastOrderAt,
-  });
+app.get('/api/dashboard', async (_req: Request, res: Response) => {
+  const r = await proxyToMarketBot('/dashboard');
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { error: 'Engine (market-bot) unavailable' });
 });
 
 app.get('/api/status', async (_req: Request, res: Response) => {
-  try {
-    const s = await getServer();
-    s.state.assets = await s.fetchAssets();
-    const assets = s.state.assets;
-    const summary = ProfitCalculationService.getSummary(assets);
-    res.json({
-      assets,
-      profitSummary: summary,
-      strategySummary: s.state.strategySummary || null,
-      botEnabled: s.state.botEnabled,
-    });
-  } catch (e) {
-    res.status(500).json({ error: (e as Error).message });
-  }
+  const r = await proxyToMarketBot('/status');
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { error: 'Engine (market-bot) unavailable' });
 });
 
 app.get('/api/pnl', async (_req: Request, res: Response) => {
-  try {
-    const s = await getServer();
-    s.state.assets = await s.fetchAssets();
-    const assets = s.state.assets;
-    const summary = ProfitCalculationService.getSummary(assets);
-    res.json({ assets, profitSummary: summary });
-  } catch (e) {
-    res.status(500).json({ error: (e as Error).message });
-  }
+  const r = await proxyToMarketBot('/pnl');
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { error: 'Engine (market-bot) unavailable' });
 });
 
-app.get('/api/engine-status', (_req: Request, res: Response) => {
-  const ctrl = EngineControlService.getState();
-  const strategyState = runtimeStrategyConfig.getState();
-  res.json({
-    status: ctrl.status,
-    startedAt: ctrl.startedAt,
-    stoppedAt: ctrl.stoppedAt,
-    updatedBy: ctrl.updatedBy,
-    lastReason: ctrl.lastReason,
-    runtimeMode: strategyState?.mode ?? null,
-  });
+app.get('/api/engine-status', async (_req: Request, res: Response) => {
+  const r = await proxyToMarketBot('/engine-status');
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { status: 'unavailable', error: 'Engine (market-bot) unavailable' });
 });
 
 app.post('/api/engine/start', async (req: Request, res: Response) => {
   const userId = (req.body && req.body.userId) || (req.headers?.['x-user-id'] as string) || 'api';
   const updatedBy = (req.body && req.body.updatedBy) || userId;
-  try {
-    const result = EngineControlService.startEngine(updatedBy);
-    if (result.noop) {
-      await AuditLogService.log({
-        userId,
-        command: 'engine_start',
-        timestamp: new Date().toISOString(),
-        success: true,
-      });
-      return res.json({ success: true, noop: true, message: result.message });
-    }
-    const s = await getServer();
-    const serverResult = await s.discordHandlers.engineStart();
-    if (serverResult && !serverResult.success) {
-      EngineControlService.stopEngine('system');
-      await AuditLogService.log({
-        userId,
-        command: 'engine_start',
-        timestamp: new Date().toISOString(),
-        success: false,
-        errorCode: serverResult.message || 'engineStart failed',
-      });
-      return res.json(serverResult);
-    }
-    await AuditLogService.log({
-      userId,
-      command: 'engine_start',
-      timestamp: new Date().toISOString(),
-      success: true,
-    });
-    res.json({ success: true, message: result.message });
-  } catch (e) {
-    EngineControlService.stopEngine('system');
-    await AuditLogService.log({
-      userId,
-      command: 'engine_start',
-      timestamp: new Date().toISOString(),
-      success: false,
-      errorCode: (e as Error).message,
-    });
-    res.status(500).json({ success: false, message: (e as Error).message });
-  }
+  const r = await proxyToMarketBot('/engine/start', { method: 'POST', body: { ...req.body, updatedBy } });
+  await AuditLogService.log({
+    userId,
+    command: 'engine_start',
+    timestamp: new Date().toISOString(),
+    success: !!(r.ok && r.data && r.data.success),
+  });
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { success: false, message: 'Engine (market-bot) unavailable' });
 });
 
 app.post('/api/engine/stop', async (req: Request, res: Response) => {
   const userId = (req.body && req.body.userId) || (req.headers?.['x-user-id'] as string) || 'api';
   const updatedBy = (req.body && req.body.updatedBy) || userId;
-  try {
-    const result = EngineControlService.stopEngine(updatedBy);
-    if (result.noop) {
-      await AuditLogService.log({
-        userId,
-        command: 'engine_stop',
-        timestamp: new Date().toISOString(),
-        success: true,
-      });
-      return res.json({ success: true, noop: true, message: result.message });
-    }
-    const s = await getServer();
-    s.discordHandlers.engineStop();
-    await AuditLogService.log({
-      userId,
-      command: 'engine_stop',
-      timestamp: new Date().toISOString(),
-      success: true,
-    });
-    res.json({ success: true, message: result.message || '엔진 정지됨' });
-  } catch (e) {
-    await AuditLogService.log({
-      userId,
-      command: 'engine_stop',
-      timestamp: new Date().toISOString(),
-      success: false,
-      errorCode: (e as Error).message,
-    });
-    res.status(500).json({ success: false, message: (e as Error).message });
-  }
+  const r = await proxyToMarketBot('/engine/stop', { method: 'POST', body: { ...req.body, updatedBy } });
+  await AuditLogService.log({
+    userId,
+    command: 'engine_stop',
+    timestamp: new Date().toISOString(),
+    success: true,
+  });
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { success: false, message: 'Engine (market-bot) unavailable' });
 });
 
 app.post('/api/sell-all', async (req: Request, res: Response) => {
   const userId = (req.body && req.body.userId) || (req.headers?.['x-user-id'] as string) || 'api';
-  try {
-    const s = await getServer();
-    const result = await s.discordHandlers.sellAll();
-    const ok = typeof result === 'string';
-    await AuditLogService.log({
-      userId,
-      command: 'sell_all',
-      timestamp: new Date().toISOString(),
-      success: ok,
-    });
-    res.json(ok ? { success: true, message: result } : { success: false, message: String(result || 'Unknown') });
-  } catch (e) {
-    await AuditLogService.log({
-      userId,
-      command: 'sell_all',
-      timestamp: new Date().toISOString(),
-      success: false,
-      errorCode: (e as Error).message,
-    });
-    res.status(500).json({ success: false, message: (e as Error).message });
-  }
+  const r = await proxyToMarketBot('/sell-all', { method: 'POST', body: req.body });
+  await AuditLogService.log({
+    userId,
+    command: 'sell_all',
+    timestamp: new Date().toISOString(),
+    success: !!(r.ok && r.data && r.data.success),
+  });
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { success: false, message: 'Engine (market-bot) unavailable' });
+});
+
+// ——— Discord 역할 A/B/C 패널용: market-bot proxy (engine-standalone에 구현된 discordHandlers 호출) ———
+app.post('/api/race-horse-toggle', async (_req: Request, res: Response) => {
+  const r = await proxyToMarketBot('/race-horse-toggle', { method: 'POST' });
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { error: 'market-bot unavailable' });
+});
+app.get('/api/relax-status', async (_req: Request, res: Response) => {
+  const r = await proxyToMarketBot('/relax-status');
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { remainingMs: 0 });
+});
+app.post('/api/relax', async (req: Request, res: Response) => {
+  const r = await proxyToMarketBot('/relax', { method: 'POST', body: req.body || {} });
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { error: 'market-bot unavailable' });
+});
+app.post('/api/relax-extend', async (_req: Request, res: Response) => {
+  const r = await proxyToMarketBot('/relax-extend', { method: 'POST' });
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { error: 'market-bot unavailable' });
+});
+app.get('/api/independent-scalp-status', async (_req: Request, res: Response) => {
+  const r = await proxyToMarketBot('/independent-scalp-status');
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { isRunning: false, remainingMs: 0 });
+});
+app.post('/api/independent-scalp-start', async (_req: Request, res: Response) => {
+  const r = await proxyToMarketBot('/independent-scalp-start', { method: 'POST' });
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { success: false });
+});
+app.post('/api/independent-scalp-stop', async (_req: Request, res: Response) => {
+  const r = await proxyToMarketBot('/independent-scalp-stop', { method: 'POST' });
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { success: false });
+});
+app.post('/api/independent-scalp-extend', async (_req: Request, res: Response) => {
+  const r = await proxyToMarketBot('/independent-scalp-extend', { method: 'POST' });
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { success: false });
+});
+app.get('/api/analyst/diagnose_no_trade', async (_req: Request, res: Response) => {
+  const r = await proxyToMarketBot('/api/analyst/diagnose_no_trade');
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { error: 'market-bot unavailable' });
+});
+app.get('/api/analyst/suggest_logic', async (_req: Request, res: Response) => {
+  const r = await proxyToMarketBot('/api/analyst/suggest_logic');
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { error: 'market-bot unavailable' });
+});
+app.get('/api/analyst/advisor_one_liner', async (_req: Request, res: Response) => {
+  const r = await proxyToMarketBot('/api/analyst/advisor_one_liner');
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { content: '' });
+});
+app.get('/api/analyst/daily_log_analysis', async (_req: Request, res: Response) => {
+  const r = await proxyToMarketBot('/api/analyst/daily_log_analysis');
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { content: '' });
+});
+app.get('/api/analyst/api_usage_monitor', async (_req: Request, res: Response) => {
+  const r = await proxyToMarketBot('/api/analyst/api_usage_monitor');
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { content: '' });
+});
+app.get('/api/ai_analysis', async (_req: Request, res: Response) => {
+  const r = await proxyToMarketBot('/api/ai_analysis');
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { content: '' });
+});
+app.post('/api/admin/git-pull-restart', async (_req: Request, res: Response) => {
+  const r = await proxyToMarketBot('/admin/git-pull-restart', { method: 'POST' });
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { error: 'market-bot unavailable' });
+});
+app.post('/api/admin/simple-restart', async (_req: Request, res: Response) => {
+  const r = await proxyToMarketBot('/admin/simple-restart', { method: 'POST' });
+  if (r.ok && r.data) return res.json(r.data);
+  res.status(r.status || 503).json(r.data || { error: 'market-bot unavailable' });
 });
 
 app.get('/api/strategy-config', (_req: Request, res: Response) => {
@@ -445,7 +437,7 @@ app.get('/api/strategy-explain-recent', async (_req: Request, res: Response) => 
   }
 });
 
-/** 콘솔 대시보드용 세그먼트 빌드 (getServer().state 기반). 실패 시 기본값만 반환 */
+/** 콘솔 대시보드용 세그먼트 빌드 (market-bot proxy 기반). */
 async function buildConsoleSegments(): Promise<{
   system_status: any;
   market_state: any;
@@ -464,7 +456,8 @@ async function buildConsoleSegments(): Promise<{
   const strategyConfigState = runtimeStrategyConfig.getState();
 
   const adminStatus = getAdminConfigStatus();
-  const engineCtrl = EngineControlService.getState();
+  const engineStatusR = await proxyToMarketBot('/engine-status');
+  const engineCtrl = engineStatusR.ok && engineStatusR.data ? engineStatusR.data : { status: 'unavailable', startedAt: null, stoppedAt: null, updatedBy: '—', lastReason: '—' };
   const system_status = {
     engine: engineCtrl.status,
     engineStartedAt: engineCtrl.startedAt,
@@ -555,81 +548,10 @@ async function buildConsoleSegments(): Promise<{
   };
 
   try {
-    const s = await getServer();
-    const st = (s as any).state || {};
-    system_status.latencyMs = typeof st.wsLagMs === 'number' ? st.wsLagMs : null;
-    if (st.marketContext && typeof st.marketContext === 'object') {
-      market_state.mode = st.marketContext.regime ?? st.marketContext.mode ?? '—';
-      market_state.volatility = st.marketContext.volatility ?? '—';
-      market_state.liquidity = st.marketContext.liquidity ?? '—';
-    }
-    if (st.lastOrchestratorResult?.signal) {
-      const sig = st.lastOrchestratorResult.signal;
-      const sym = (sig.symbol || (sig.market || '').replace('KRW-', '')) || '—';
-      strategy_signals.push({
-        coin: sym,
-        signalType: st.lastOrchestratorResult.action === 'ENTER' ? 'BUY' : 'HOLD',
-        edgeBps: st.lastOrchestratorResult.finalScore != null ? Math.round(st.lastOrchestratorResult.finalScore * 100) : null,
-        rotationCandidate: !!(st.raceHorseActive && ['BTC','ETH','SOL','XRP'].includes(sym)),
-      });
-    }
-    if (st.scalpState && typeof st.scalpState === 'object') {
-      for (const [market, entry] of Object.entries(st.scalpState as Record<string, any>)) {
-        const sym = (market || '').replace('KRW-', '') || '—';
-        if (entry?.entryScore != null && !strategy_signals.some((s) => s.coin === sym)) {
-          strategy_signals.push({
-            coin: sym,
-            signalType: entry.entryScore >= (st.strategySummary?.entry_score_min ?? 4) ? 'BUY' : 'HOLD',
-            edgeBps: entry.entryScore != null ? Math.round(entry.entryScore * 10) : null,
-            rotationCandidate: ['BTC','ETH','SOL','XRP'].includes(sym),
-          });
-        }
-      }
-    }
-    const accounts = st.accounts || [];
-    const prices = st.prices || {};
-    for (const a of accounts) {
-      const cur = (a.currency || '').toUpperCase();
-      if (cur === 'KRW') continue;
-      const bal = parseFloat(a.balance || 0);
-      if (bal <= 0) continue;
-      const avgBuy = parseFloat(a.avg_buy_price || 0);
-      const market = 'KRW-' + cur;
-      const ticker = prices[market];
-      const tradePrice = ticker?.tradePrice ?? ticker?.trade_price ?? 0;
-      const entryPrice = avgBuy > 0 ? avgBuy : tradePrice;
-      const pnlPct = entryPrice > 0 && tradePrice > 0 ? ((tradePrice / entryPrice) - 1) * 100 : 0;
-      const updatedAt = a.updated_at ? new Date(a.updated_at).getTime() : null;
-      const holdTimeMin = updatedAt ? Math.floor((Date.now() - updatedAt) / 60000) : 0;
-      positions.push({
-        coin: cur,
-        size: bal,
-        entryPrice,
-        pnl: (tradePrice - entryPrice) * bal,
-        pnlPct,
-        holdTimeMin,
-      });
-    }
-    if (st.trades && Array.isArray(st.trades) && execution_log.length < 30) {
-      for (const t of (st.trades as any[]).slice(0, 20)) {
-        execution_log.push({
-          time: t.timestamp ?? t.created_at,
-          coin: (t.ticker || t.market || '').replace('KRW-', ''),
-          action: (t.side || 'BUY').toUpperCase(),
-          price: t.price ?? null,
-          edge: null,
-          reason: t.reason ?? '—',
-          symbol: (t.ticker || t.market || '').replace('KRW-', ''),
-          source_strategy: null,
-          raw_entry_score: null,
-          normalized_score: null,
-          final_orchestrator_score: null,
-          threshold_entry: null,
-          min_orchestrator_score: null,
-          skip_reason: null,
-          reason_summary: t.reason ?? '—',
-        });
-      }
+    const statusR = await proxyToMarketBot('/status');
+    if (statusR.ok && statusR.data && statusR.data.assets) {
+      const st = statusR.data;
+      if (st.lastOrderAt) system_status.lastOrderAt = st.lastOrderAt;
     }
   } catch (_) {}
 
@@ -692,13 +614,8 @@ httpServer.listen(PORT, () => {
   console.log(`[api-server] http://localhost:${PORT}`);
   const adminStatus = getAdminConfigStatus();
   const strategyState = runtimeStrategyConfig.getState();
-  console.log('[startup] app=api-server port=' + PORT + ' ADMIN_ID loaded: ' + (adminStatus.adminConfigPresent ? 'Yes' : 'No') + ' runtimeMode=' + (strategyState?.mode || '—') + ' lockFile=.server.lock');
-  try {
-    require('../../trading-engine/src/index');
-    console.log('[api-server] trading-engine loaded');
-  } catch (e) {
-    console.error('[api-server] trading-engine load failed:', (e as Error).message);
-  }
+  console.log('[startup] app=api-server port=' + PORT + ' ADMIN_ID loaded: ' + (adminStatus.adminConfigPresent ? 'Yes' : 'No') + ' runtimeMode=' + (strategyState?.mode || '—') + ' no engine (proxy to market-bot)');
+  console.log('[api-server] no engine side effects confirmed');
 });
 
-export { app, io, httpServer, getServer };
+export { app, io, httpServer };

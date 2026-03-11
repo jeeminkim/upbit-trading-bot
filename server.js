@@ -32,23 +32,27 @@ process.on('uncaughtException', (err) => {
 const fs = require('fs');
 const serverLock = require('./lib/serverLock');
 const SERVER_LOCK_PATH = path.join(__dirname, '.server.lock');
-(function ensureSingleInstance() {
-  const result = serverLock.tryAcquire(SERVER_LOCK_PATH);
-  if (!result.acquired) {
-    console.error('[fatal][server] Another active instance detected. Startup aborted.', {
-      existing_pid: result.existingPid,
-      lock_file: SERVER_LOCK_PATH,
-      cwd: result.existingCwd || process.cwd(),
-    });
-    process.exit(1);
-  }
-  function releaseLock() {
-    serverLock.release(SERVER_LOCK_PATH);
-  }
-  process.on('exit', releaseLock);
-  process.on('SIGINT', () => { releaseLock(); process.exit(0); });
-  process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
-})();
+let _exportDiscordHandlers = null; // require 시 engine-standalone 등에서 사용
+// lock은 engine을 실행하는 프로세스(market-bot / engine-standalone)에서만 사용. api-server가 server.js를 require할 때는 lock 하지 않음.
+if (require.main === module) {
+  (function ensureSingleInstance() {
+    const result = serverLock.tryAcquire(SERVER_LOCK_PATH);
+    if (!result.acquired) {
+      console.error('[fatal][server] Another active instance detected. Startup aborted.', {
+        existing_pid: result.existingPid,
+        lock_file: SERVER_LOCK_PATH,
+        cwd: result.existingCwd || process.cwd(),
+      });
+      process.exit(1);
+    }
+    function releaseLock() {
+      serverLock.release(SERVER_LOCK_PATH);
+    }
+    process.on('exit', releaseLock);
+    process.on('SIGINT', () => { releaseLock(); process.exit(0); });
+    process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
+  })();
+}
 const http = require('http');
 const express = require('express');
 const { Server } = require('socket.io');
@@ -124,6 +128,8 @@ const ASSET_POLL_MS = 1000;
 const FX_POLL_MS = 60000;
 const LOG_EMIT_MS = 800;
 const PREV_HIGH_WINDOW = 60;
+/** 전 엔진 공통: 이 금액 미만이면 신규 매수 전부 중단 (EngineStateStore.init / updateCashLock 등보다 위에 정의) */
+const GLOBAL_MIN_BUYABLE_KRW = 5000;
 
 function loadApiKeys() {
   const fromEnv = (key, def = '') => (process.env[key] || '').trim() || def;
@@ -539,9 +545,6 @@ app.get('/api/check-upbit', async (req, res) => {
     return res.json({ ok: false, message: err.message || '연결 실패', sysdate: sysdateStr });
   }
 });
-
-/** 전 엔진 공통: 이 금액 미만이면 신규 매수 전부 중단 (init보다 위에서 정의해 TDZ 방지) */
-const GLOBAL_MIN_BUYABLE_KRW = 5000;
 
 EngineStateStore.init({
   assets: null,
@@ -3310,7 +3313,10 @@ const initPromise = (async () => {
     console.log('[MyScalpBot] 1시간 헬스체크 예약됨 (관리자 DM: 가즈아)');
   }
 
-  if (require.main !== module) module.exports.discordHandlers = discordHandlers;
+  if (require.main !== module) {
+    _exportDiscordHandlers = discordHandlers;
+    module.exports.discordHandlers = discordHandlers;
+  }
 
   if (require.main === module) {
     // 부팅 시퀀스 직렬화: 1) fetchAssets 2) gemini.init() 3) client.login (순서 보장)
@@ -3439,15 +3445,13 @@ if (require.main !== module) {
     fetchAssets,
     runScalpCycle,
     buildCurrentStateEmbed,
-    buildCurrentReturnEmbed,
     getProfitPct,
     apiKeys,
     SCALP_MARKETS,
     upbit,
-    cancelAllOrders,
     TradeExecutor,
     db,
-    discordHandlers: null
+    discordHandlers: _exportDiscordHandlers
   };
 }
 

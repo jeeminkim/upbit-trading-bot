@@ -1,13 +1,17 @@
 /**
  * PM2 — 리팩터 구조 (api-server + discord-operator + market-bot)
- * api-server: Express + Socket.IO + trading-engine 루프 (동일 프로세스)
- * Windows 지원: script는 .js, cwd=프로젝트 루트, node로 실행
+ * api-server: HTTP + Socket.IO + health 전용. engine은 proxy로 market-bot에 위임.
+ * market-bot: engine lock + server.js + trading 루프 + HTTP API (port 3001).
+ * discord-operator: Discord A/B/C 패널 + 재기동 메시지 + Slash commands.
  * 빌드: npm run build:refactor
  * 실행: npm run pm2:refactor
- * 로그/데이터: logs/ 및 data/ 폴더가 없으면 생성해 두세요. (audit.db는 data/에 생성됨)
+ *
+ * .env: 이 파일 로드 시점에 dotenv로 먼저 읽어서 PM2 자식 프로세스에 전달합니다.
  */
 const path = require('path');
 const fs = require('fs');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
+
 const root = path.resolve(__dirname);
 const dist = path.join(root, 'dist-refactor');
 [path.join(root, 'logs'), path.join(root, 'data')].forEach((dir) => {
@@ -24,31 +28,37 @@ const common = {
   max_restarts: 10,
   restart_delay: 3000,
   max_memory_restart: '500M',
-  env: { NODE_ENV: 'production' },
-  error_file: path.join(root, 'logs', 'pm2-%name%-error.log'),
-  out_file: path.join(root, 'logs', 'pm2-%name%-out.log'),
-  merge_logs: false,
+  env: { ...process.env, NODE_ENV: 'production' },
 };
 
 module.exports = {
   apps: [
     {
       name: 'api-server',
-      script: path.join(dist, 'apps', 'api-server', 'src', 'index.js'),
+      script: path.join(root, 'scripts', 'run-api-server.js'),
       ...common,
       max_memory_restart: '600M',
+      error_file: path.join(root, 'logs', 'pm2-api-server-error.log'),
+      out_file: path.join(root, 'logs', 'pm2-api-server-out.log'),
+      merge_logs: true,
     },
     {
       name: 'discord-operator',
       script: path.join(dist, 'apps', 'discord-operator', 'src', 'index.js'),
       ...common,
       max_memory_restart: '300M',
+      error_file: path.join(root, 'logs', 'pm2-discord-operator-error.log'),
+      out_file: path.join(root, 'logs', 'pm2-discord-operator-out.log'),
+      merge_logs: true,
     },
     {
       name: 'market-bot',
-      script: path.join(dist, 'apps', 'market-bot', 'src', 'index.js'),
+      script: path.join(root, 'scripts', 'engine-standalone.js'),
       ...common,
-      max_memory_restart: '300M',
+      max_memory_restart: '600M',
+      error_file: path.join(root, 'logs', 'pm2-market-bot-error.log'),
+      out_file: path.join(root, 'logs', 'pm2-market-bot-out.log'),
+      merge_logs: true,
     },
   ],
 };
