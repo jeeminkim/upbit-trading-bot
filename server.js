@@ -1341,6 +1341,17 @@ function recordReject(ticker, reason, scoreAtReject) {
 function recordTrade(row) {
   const r = { ...row, strategy_id: row.strategy_id ?? state.currentStrategyId };
   db.insertTrade(r).catch((e) => console.error('recordTrade:', e.message));
+  try {
+    const { EventBus } = require('./dist-refactor/packages/core/src/EventBus');
+    EventBus.emit('ORDER_FILLED', {
+      market: row.ticker,
+      ticker: row.ticker,
+      side: row.side,
+      price: row.price,
+      volume: row.quantity,
+      reason: row.reason,
+    });
+  } catch (_) {}
   const side = (row.side || '').toLowerCase();
   const tag = row.is_test ? '수동/테스트' : (side === 'buy' ? 'BUY_COMPLETE' : 'EXIT');
   if (row.is_test) {

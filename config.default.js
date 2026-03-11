@@ -80,6 +80,26 @@ const CLEANUP_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const API_RETRY_MAX = 3;
 const API_RETRY_DELAY_MS = 500;
 
+/**
+ * 오케스트레이터 관련 설정
+ *
+ * DEPRECATED / DO NOT USE FOR RUNTIME DECISION:
+ * - entry_threshold, min_score_gate 는 런타임 진입 판단에 사용되지 않습니다.
+ * - SOURCE OF TRUTH = lib/runtimeStrategyConfig.js (MODE_PROFILES, getThresholdEntry, getMinOrchestratorScore)
+ * - signalComparator / riskGate 는 위 런타임 설정만 참조합니다.
+ * - 아래 값은 레거시/문서용이며, 제거해도 런타임 동작에는 영향 없습니다.
+ *
+ * 사용 중:
+ * - normalizer_floor_score: B안. 통과 신호 최저 정규화 점수 (0~1). 설정 시 signalNormalizer에서 사용 (기본 0.35)
+ */
+const ORCHESTRATOR = {
+  /** @deprecated DO NOT USE. 진입 판단은 lib/runtimeStrategyConfig.js 단일 소스 */
+  entry_threshold: undefined,
+  /** @deprecated DO NOT USE. 진입 판단은 lib/runtimeStrategyConfig.js 단일 소스 */
+  min_score_gate: undefined,
+  normalizer_floor_score: undefined
+};
+
 /** 프로필에서 안전하게 숫자 가져오기 (null/undefined 시 기본값) */
 function getProfileNum(profile, key, fallback = 0) {
   const v = profile[key];
@@ -106,6 +126,7 @@ module.exports = {
   CLEANUP_INTERVAL_MS,
   API_RETRY_MAX,
   API_RETRY_DELAY_MS,
+  ORCHESTRATOR,
   getProfileNum,
   clampWeight
 };

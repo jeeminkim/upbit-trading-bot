@@ -159,6 +159,27 @@ async function registerSlashCommands(): Promise<void> {
     { name: 'pnl', description: '수익률' },
     { name: 'health', description: '헬스체크' },
     {
+      name: 'strategy-mode',
+      description: '전략 모드 전환 (진입 threshold)',
+      options: [
+        {
+          type: 3,
+          name: 'mode',
+          description: 'SAFE(0.62) / A_CONSERVATIVE(0.45) / A_BALANCED(0.38) / A_ACTIVE(0.35)',
+          required: true,
+          choices: [
+            { name: 'SAFE (0.62)', value: 'SAFE' },
+            { name: 'A-보수적 (0.45)', value: 'A_CONSERVATIVE' },
+            { name: 'A-균형형 (0.38)', value: 'A_BALANCED' },
+            { name: 'A-적극형 (0.35)', value: 'A_ACTIVE' },
+          ],
+        },
+      ],
+    },
+    { name: 'strategy-status', description: '전략 모드·30분 거래/스킵 현황' },
+    { name: 'strategy-explain-recent', description: '최근 10건 decision 로그 (BUY/SKIP 사유)' },
+    { name: 'strategy-skip-top', description: '최근 30분 skip reason 상위' },
+    {
       name: 'analyst',
       description: '분석',
       options: [
@@ -228,6 +249,28 @@ async function sendOperatorPanel(channel: any): Promise<void> {
         },
       ],
     });
+    await channel.send({
+      content: '**전략 모드** (RuntimeStrategyModeService 기준)',
+      components: [
+        {
+          type: 1,
+          components: [
+            { type: 2, style: 2, custom_id: 'strategy_safe', label: 'SAFE' },
+            { type: 2, style: 2, custom_id: 'strategy_conservative', label: 'A-보수적' },
+            { type: 2, style: 2, custom_id: 'strategy_balanced', label: 'A-균형형' },
+            { type: 2, style: 2, custom_id: 'strategy_active', label: 'A-적극형' },
+          ],
+        },
+        {
+          type: 1,
+          components: [
+            { type: 2, style: 1, custom_id: 'strategy_view_config', label: '현재전략' },
+            { type: 2, style: 2, custom_id: 'strategy_skip_recent', label: '최근스킵' },
+            { type: 2, style: 2, custom_id: 'strategy_buy_recent', label: '최근체결' },
+          ],
+        },
+      ],
+    });
   } catch (e) {
     console.error('[discord-operator] Operator panel send failed:', (e as Error).message);
   }
@@ -268,6 +311,87 @@ async function handleButton(interaction: any): Promise<void> {
     ConfirmFlow.cancel(tokenId);
     await interaction.deferUpdate().catch(() => {});
     await interaction.update({ content: '취소되었습니다.', components: [] }).catch(() => {});
+    return;
+  }
+
+  const strategyModeMap: Record<string, string> = {
+    strategy_safe: 'SAFE',
+    strategy_conservative: 'A_CONSERVATIVE',
+    strategy_balanced: 'A_BALANCED',
+    strategy_active: 'A_ACTIVE',
+  };
+  if (strategyModeMap[customId]) {
+    const ctx = PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
+    if (!PermissionService.can(ctx, 'strategy-mode')) {
+      await interaction.reply({ content: '권한 없음 (ADMIN만 전략 모드 전환이 가능합니다)', ephemeral: true }).catch(() => {});
+      return;
+    }
+    await interaction.deferReply({ ephemeral: true }).catch(() => {});
+    try {
+      const result = await api<{ ok?: boolean; error?: string; mode?: string; thresholdEntry?: number; minOrchestratorScore?: number; updatedBy?: string; updatedAt?: string }>(
+        '/api/strategy-mode',
+        { method: 'POST', body: { mode: strategyModeMap[customId], updatedBy: 'discord' }, userId: interaction.user?.id }
+      );
+      if (result?.ok) {
+        const line = `전략 모드가 **${result.mode}**로 변경되었습니다.\n- threshold_entry: ${result.thresholdEntry}\n- min_orchestrator_score: ${result.minOrchestratorScore}\n- updated_by: ${result.updatedBy}\n- updated_at: ${result.updatedAt ? result.updatedAt.slice(0, 19).replace('T', ' ') : '—'}`;
+        await interaction.editReply({ content: line }).catch(() => {});
+        await AuditLogService.log({
+          userId: interaction.user?.id ?? 'discord',
+          command: 'strategy_mode_change',
+          timestamp: new Date().toISOString(),
+          success: true,
+        });
+      } else {
+        await interaction.editReply({ content: `오류: ${result?.error ?? 'Unknown'}` }).catch(() => {});
+      }
+    } catch (e) {
+      await interaction.editReply({ content: `오류: ${(e as Error).message}` }).catch(() => {});
+    }
+    return;
+  }
+  if (customId === 'strategy_view_config') {
+    await interaction.deferReply({ ephemeral: true }).catch(() => {});
+    try {
+      const data = await api<{ mode?: string; profile?: { description?: string }; thresholdEntry?: number; minOrchestratorScore?: number; updatedBy?: string; updatedAt?: string }>('/api/strategy-config');
+      const at = data.updatedAt ? data.updatedAt.slice(0, 19).replace('T', ' ') : '—';
+      const desc = data.profile?.description ?? '—';
+      const line = `**현재 전략 모드: ${data.mode ?? '—'}**\n- threshold_entry: ${data.thresholdEntry ?? '—'}\n- min_orchestrator_score: ${data.minOrchestratorScore ?? '—'}\n- updated_by: ${data.updatedBy ?? '—'}\n- updated_at: ${at}\n- description: ${desc}`;
+      await interaction.editReply({ content: line }).catch(() => {});
+    } catch (e) {
+      await interaction.editReply({ content: `오류: ${(e as Error).message}` }).catch(() => {});
+    }
+    return;
+  }
+  if (customId === 'strategy_skip_recent') {
+    await interaction.deferReply({ ephemeral: true }).catch(() => {});
+    try {
+      const data = await api<{ skipTop5?: { reason: string; count: number }[] }>('/api/strategy-status');
+      const lines = (data.skipTop5 || []).map((s) => `${s.reason} (${s.count}건)`).join('\n') || '—';
+      const embed = new MessageEmbed()
+        .setTitle('최근 30분 skip reason (상위 5)')
+        .setColor(0x5865f2)
+        .setDescription(lines || '데이터 없음')
+        .setTimestamp();
+      await interaction.editReply({ embeds: [embed] }).catch(() => {});
+    } catch (e) {
+      await interaction.editReply({ content: `오류: ${(e as Error).message}` }).catch(() => {});
+    }
+    return;
+  }
+  if (customId === 'strategy_buy_recent') {
+    await interaction.deferReply({ ephemeral: true }).catch(() => {});
+    try {
+      const data = await api<{ buyRecent5?: { symbol: string; time?: string; finalScore?: number; reason?: string }[] }>('/api/strategy-status');
+      const lines = (data.buyRecent5 || []).map((b, i) => `${i + 1}) ${b.symbol} BUY | final ${b.finalScore ?? '—'} | ${b.reason ?? ''}`).join('\n') || '—';
+      const embed = new MessageEmbed()
+        .setTitle('최근 BUY 로그 (5건)')
+        .setColor(0x57f287)
+        .setDescription(lines || '데이터 없음')
+        .setTimestamp();
+      await interaction.editReply({ embeds: [embed] }).catch(() => {});
+    } catch (e) {
+      await interaction.editReply({ content: `오류: ${(e as Error).message}` }).catch(() => {});
+    }
     return;
   }
 
@@ -425,6 +549,65 @@ async function handleSlash(interaction: any): Promise<void> {
         .setTimestamp();
       await interaction.editReply({ embeds: [embed] }).catch(() => {});
       await AuditLogService.log({ userId, command: 'analyst_indicators', timestamp: new Date().toISOString(), success: !!result?.ok });
+    } else if (name === 'strategy-mode') {
+      const mode = interaction.options?.getString?.('mode')?.trim?.()?.toUpperCase?.();
+      if (!mode) {
+        await interaction.editReply({ content: 'mode 옵션을 선택해 주세요 (SAFE, A_CONSERVATIVE, A_BALANCED, A_ACTIVE)' }).catch(() => {});
+        return;
+      }
+      const result = await api<{ ok?: boolean; error?: string; mode?: string; thresholdEntry?: number; minOrchestratorScore?: number; updatedBy?: string; updatedAt?: string }>(
+        '/api/strategy-mode',
+        { method: 'POST', body: { mode, updatedBy: 'discord' }, userId }
+      );
+      if (result?.ok) {
+        const line = `전략 모드가 **${result.mode}**로 변경되었습니다.\n- threshold_entry: ${result.thresholdEntry}\n- min_orchestrator_score: ${result.minOrchestratorScore}\n- updated_by: ${result.updatedBy}\n- updated_at: ${result.updatedAt ? result.updatedAt.slice(0, 19).replace('T', ' ') : '—'}`;
+        await interaction.editReply({ content: line }).catch(() => {});
+        await AuditLogService.log({ userId, command: 'strategy_mode_change', timestamp: new Date().toISOString(), success: true });
+      } else {
+        await interaction.editReply({ content: `오류: ${result?.error ?? 'Unknown'}` }).catch(() => {});
+      }
+    } else if (name === 'strategy-status') {
+      const data = await api<any>('/api/strategy-status');
+      const topSkip = (data.skipTop5 || [])[0];
+      const topSkipLine = topSkip ? `${topSkip.reason} (${topSkip.count}건)` : '—';
+      const lines = [
+        `현재 전략 모드: ${data.mode ?? '—'}`,
+        `- threshold_entry: ${data.thresholdEntry ?? '—'}`,
+        `- min_orchestrator_score: ${data.minOrchestratorScore ?? '—'}`,
+        `- 최근 30분 trade count: ${data.tradeCountLast30m ?? 0}`,
+        `- 최근 30분 decision count: ${data.decisionCountLast30m ?? 0}`,
+        `- 최근 30분 top skip reason: ${topSkipLine}`,
+      ];
+      const embed = new MessageEmbed()
+        .setTitle('📊 전략 현황')
+        .setColor(0x5865f2)
+        .setDescription(lines.join('\n'))
+        .setTimestamp();
+      await interaction.editReply({ embeds: [embed] }).catch(() => {});
+    } else if (name === 'strategy-skip-top') {
+      const data = await api<{ skipTop5?: { reason: string; count: number }[] }>('/api/strategy-status');
+      const lines = (data.skipTop5 || []).map((s: any) => `${s.reason} (${s.count}건)`).join('\n') || '—';
+      const embed = new MessageEmbed()
+        .setTitle('최근 30분 skip reason (상위 5)')
+        .setColor(0x5865f2)
+        .setDescription(lines || '데이터 없음')
+        .setTimestamp();
+      await interaction.editReply({ embeds: [embed] }).catch(() => {});
+    } else if (name === 'strategy-explain-recent') {
+      const result = await api<{ ok?: boolean; decisions?: any[] }>('/api/strategy-explain-recent');
+      const list = (result?.decisions || []).map((d: any, i: number) => {
+        const raw = d.raw_entry_score != null ? d.raw_entry_score : '—';
+        const norm = d.normalized_score != null ? Number(d.normalized_score).toFixed(2) : '—';
+        const final = d.final_orchestrator_score != null ? Number(d.final_orchestrator_score).toFixed(2) : '—';
+        const reason = d.reason_summary || d.skip_reason || '—';
+        return `${i + 1}) ${d.symbol} ${d.action} | raw ${raw} | norm ${norm} | final ${final} | ${reason}`;
+      }).join('\n') || '—';
+      const embed = new MessageEmbed()
+        .setTitle('📋 최근 decision log')
+        .setColor(0x5865f2)
+        .setDescription('```\n' + list + '\n```')
+        .setTimestamp();
+      await interaction.editReply({ embeds: [embed] }).catch(() => {});
     } else {
       await interaction.editReply({ content: '알 수 없는 명령입니다.' }).catch(() => {});
     }

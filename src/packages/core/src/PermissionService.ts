@@ -17,6 +17,12 @@ const COMMAND_MIN_LEVEL: Record<string, PermissionLevel> = {
   'analyst_major_indicators': PermissionLevel.ANALYST,
   'ai_analysis': PermissionLevel.ANALYST,
   'health': PermissionLevel.VIEWER,
+  'strategy-mode': PermissionLevel.ADMIN,
+  'strategy_status': PermissionLevel.VIEWER,
+  'strategy-status': PermissionLevel.VIEWER,
+  'strategy_explain_recent': PermissionLevel.VIEWER,
+  'strategy-explain-recent': PermissionLevel.VIEWER,
+  'strategy-skip-top': PermissionLevel.VIEWER,
 };
 
 const userRateCount = new Map<string, { count: number; resetAt: number }>();

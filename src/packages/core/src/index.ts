@@ -10,6 +10,8 @@ export { ConfirmFlow } from './ConfirmFlow';
 export { getDbSync, closeDb } from './AuditLogDb';
 export { MarketSnapshotService } from './MarketSnapshotService';
 export { GeminiAnalysisService } from './GeminiAnalysisService';
+export { StrategyExplainService } from './StrategyExplainService';
 export type { ProfitSummary } from './ProfitCalculationService';
 export type { HealthReport } from './HealthReportService';
 export type { TopTicker, EnrichedTicker, MarketIndicators } from './MarketSnapshotService';
+export type { ExplainEntry } from './StrategyExplainService';
