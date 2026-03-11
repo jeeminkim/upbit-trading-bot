@@ -7,51 +7,59 @@ exports.startDiscordOperator = startDiscordOperator;
 exports.getClient = getClient;
 const path_1 = __importDefault(require("path"));
 require('dotenv').config({ path: path_1.default.join(process.cwd(), '.env') });
-// ===== DISCORD OPERATOR BOOT DIAGNOSTIC =====
-console.log('[DISCORD_BOOT] process start');
-console.log('[DISCORD_BOOT] cwd:', process.cwd());
-console.log('[DISCORD_BOOT] pid:', process.pid);
-console.log('[DISCORD_BOOT] node:', process.version);
-console.log('[DISCORD_BOOT] file:', __filename);
-process.on('uncaughtException', (err) => {
-    console.error('[DISCORD_BOOT][uncaughtException]', err);
-});
-process.on('unhandledRejection', (err) => {
-    console.error('[DISCORD_BOOT][unhandledRejection]', err);
-});
-console.log('[DISCORD_ENV] DISCORD_TOKEN exists:', !!(process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN));
-console.log('[DISCORD_ENV] CHANNEL_ID exists:', !!(process.env.DISCORD_OPERATOR_CHANNEL_ID || process.env.CHANNEL_ID));
-console.log('[DISCORD_ENV] ADMIN_ID exists:', !!(process.env.ADMIN_ID || process.env.DISCORD_ADMIN_ID));
 const discord_js_1 = require("discord.js");
 const discord = require('discord.js');
 const Intents = discord.Intents;
 const PermissionService_1 = require("../../../packages/core/src/PermissionService");
 const AuditLogService_1 = require("../../../packages/core/src/AuditLogService");
 const ConfirmFlow_1 = require("../../../packages/core/src/ConfirmFlow");
+const LogUtil_1 = require("../../../packages/core/src/LogUtil");
 const errors_1 = require("../../../packages/shared/src/errors");
+const LOG_TAG = 'DISCORD_OP';
+/** PANEL_RESTORE 진단 로그 — LOG_LEVEL 무관하게 항상 출력 (logWarn 사용) */
+function panelRestoreWarn(tag, detail) {
+    LogUtil_1.LogUtil.logWarn(LOG_TAG, `[PANEL_RESTORE][${tag}] ${JSON.stringify(detail)}`);
+}
+/** PANEL_RESTORE 실패 로그 — error + stack 일부 */
+function panelRestoreFail(tag, err, extra) {
+    const e = err;
+    const stack = e?.stack ? e.stack.split('\n').slice(0, 4).join(' | ') : '';
+    LogUtil_1.LogUtil.logError(LOG_TAG, `[PANEL_RESTORE][${tag}] ${e?.message ?? String(err)}`, { ...extra, stack });
+}
+// ===== DISCORD OPERATOR BOOT DIAGNOSTIC (timestamp 항상 포함) =====
+LogUtil_1.LogUtil.logInfo(LOG_TAG, 'process start', { cwd: process.cwd(), pid: process.pid, node: process.version });
+process.on('uncaughtException', (err) => {
+    LogUtil_1.LogUtil.logError(LOG_TAG, 'uncaughtException', { message: err.message, stack: err.stack });
+});
+process.on('unhandledRejection', (err) => {
+    LogUtil_1.LogUtil.logError(LOG_TAG, 'unhandledRejection', { message: String(err) });
+});
+if (LogUtil_1.LogUtil.isDebugLog()) {
+    LogUtil_1.LogUtil.logDebug(LOG_TAG, 'DISCORD_TOKEN exists: ' + !!(process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN));
+    LogUtil_1.LogUtil.logDebug(LOG_TAG, 'CHANNEL_ID exists: ' + !!(process.env.DISCORD_OPERATOR_CHANNEL_ID || process.env.CHANNEL_ID));
+    LogUtil_1.LogUtil.logDebug(LOG_TAG, 'ADMIN_ID exists: ' + !!(process.env.ADMIN_ID || process.env.DISCORD_ADMIN_ID));
+}
 // 필수: 토큰과 채널 ID만 검증 (DISCORD_OPERATOR_CHANNEL_ID 또는 CHANNEL_ID)
 const token = (process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || '').trim();
 const channelId = (process.env.DISCORD_OPERATOR_CHANNEL_ID || process.env.CHANNEL_ID || '').trim();
 if (!token) {
-    console.error('[discord-operator] Missing required env: DISCORD_TOKEN or DISCORD_BOT_TOKEN');
+    LogUtil_1.LogUtil.logError(LOG_TAG, 'Missing required env: DISCORD_TOKEN or DISCORD_BOT_TOKEN');
     process.exit(1);
 }
 if (!channelId) {
-    console.error('[discord-operator] Missing required env: DISCORD_OPERATOR_CHANNEL_ID or CHANNEL_ID');
+    LogUtil_1.LogUtil.logError(LOG_TAG, 'Missing required env: DISCORD_OPERATOR_CHANNEL_ID or CHANNEL_ID');
     process.exit(1);
 }
-// DISCORD_CLIENT_ID 미설정 시 ready 후 client.user.id로 슬래시 명령 등록. DISCORD_GUILD_ID 미설정 시 전역 등록(즉시 반영 가능).
 if (!process.env.DISCORD_CLIENT_ID?.trim() || !process.env.DISCORD_GUILD_ID?.trim()) {
-    if (process.env.DISCORD_OPERATOR_DEBUG === '1') {
-        console.log('[discord-operator] DISCORD_CLIENT_ID/GUILD_ID 미설정 — client.user.id로 전역 슬래시 명령 등록');
-    }
+    if (process.env.DISCORD_OPERATOR_DEBUG === '1')
+        LogUtil_1.LogUtil.logDebug(LOG_TAG, 'DISCORD_CLIENT_ID/GUILD_ID 미설정 — 전역 슬래시 명령 등록');
 }
 const adminId = (process.env.ADMIN_ID || process.env.DISCORD_ADMIN_ID || '').trim();
 const DASHBOARD_URL = (process.env.DASHBOARD_URL || process.env.API_URL || 'http://localhost:3000').replace(/\/$/, '');
-console.log('[DISCORD_INIT] creating client');
+LogUtil_1.LogUtil.logInfo(LOG_TAG, 'creating client');
 const client = new discord_js_1.Client({ intents: [Intents?.FLAGS?.GUILDS ?? 1] });
 client.on('error', (err) => {
-    console.error('[DISCORD_ERROR]', err);
+    LogUtil_1.LogUtil.logError(LOG_TAG, 'client error', { message: (err && err.message) || String(err) });
 });
 let startupMessageSent = false;
 async function api(path, opts) {
@@ -178,17 +186,17 @@ async function registerSlashCommands(client) {
         },
     ];
     if (!client.application) {
-        console.warn('[discord] client.application not ready, skip slash command registration');
+        LogUtil_1.LogUtil.logWarn(LOG_TAG, 'client.application not ready, skip slash command registration');
         return;
     }
     const guildId = process.env.DISCORD_GUILD_ID?.trim();
     if (guildId) {
         await client.application.commands.set(commands, guildId);
-        console.log('[discord] slash commands registered guild:', guildId);
+        LogUtil_1.LogUtil.logInfo(LOG_TAG, 'slash commands registered', { guildId });
     }
     else {
         await client.application.commands.set(commands);
-        console.log('[discord] slash commands registered global');
+        LogUtil_1.LogUtil.logInfo(LOG_TAG, 'slash commands registered global');
     }
 }
 let healthDmScheduled = false;
@@ -205,65 +213,222 @@ function scheduleHourlyHealthDm() {
             const embed = buildHealthEmbedFromApi(report);
             const user = await client.users.fetch(adminId).catch(() => null);
             if (user)
-                await user.send({ content: '1시간 헬스체크', embeds: [embed] }).catch((e) => console.warn('[discord-operator] health DM failed', e?.message));
+                await user.send({ content: '1시간 헬스체크', embeds: [embed] }).catch((e) => LogUtil_1.LogUtil.logWarn(LOG_TAG, 'health DM failed', { message: e?.message }));
         }
         catch (e) {
-            console.warn('[discord-operator] health check fetch failed', e.message);
+            LogUtil_1.LogUtil.logWarn(LOG_TAG, 'health check fetch failed', { message: e.message });
         }
     }
     setInterval(runHealthCheck, ONE_HOUR_MS);
     setTimeout(runHealthCheck, ONE_HOUR_MS);
-    console.log('[discord-operator] 1시간 헬스체크 DM 예약됨');
+    LogUtil_1.LogUtil.logInfo(LOG_TAG, '1시간 헬스체크 DM 예약됨');
 }
 const fs = require('fs');
 const PANEL_FILE = path_1.default.join(process.cwd(), 'state', 'discord-panel.json');
+/** 역할 A(현장 지휘관) / B(정보 분석가) / C(서버 관리자) — 한 메시지 내 최대 5 row, row당 5버튼. 전략 4종은 메인에 두지 않고 "전략" 버튼 클릭 시에만 노출. */
 function buildPanelComponents() {
     return [
-        { type: 1, components: [{ type: 2, style: 1, custom_id: 'current_state', label: '현재 상태' }, { type: 2, style: 1, custom_id: 'current_return', label: '수익률' }, { type: 2, style: 1, custom_id: 'health', label: '헬스' }] },
-        { type: 1, components: [{ type: 2, style: 2, custom_id: 'analyst_scan_vol', label: '급등주 분석' }, { type: 2, style: 2, custom_id: 'analyst_get_prompt', label: '시황 요약' }, { type: 2, style: 2, custom_id: 'analyst_indicators', label: '주요지표' }] },
-        { type: 1, components: [{ type: 2, style: 2, custom_id: 'strategy_safe', label: 'SAFE' }, { type: 2, style: 2, custom_id: 'strategy_conservative', label: 'A-보수적' }, { type: 2, style: 2, custom_id: 'strategy_balanced', label: 'A-균형형' }, { type: 2, style: 2, custom_id: 'strategy_active', label: 'A-적극형' }] },
-        { type: 1, components: [{ type: 2, style: 1, custom_id: 'strategy_view_config', label: '현재전략' }, { type: 2, style: 2, custom_id: 'strategy_skip_recent', label: '최근스킵' }, { type: 2, style: 2, custom_id: 'strategy_buy_recent', label: '최근체결' }] },
+        // 역할 A — Row 1: 엔진 제어 + 상태/수익률 + 전체 매도
+        {
+            type: 1,
+            components: [
+                { type: 2, style: 3, custom_id: 'engine_start', label: '엔진 가동' },
+                { type: 2, style: 4, custom_id: 'engine_stop', label: '즉시 정지' },
+                { type: 2, style: 2, custom_id: 'current_state', label: '현재 상태' },
+                { type: 2, style: 2, custom_id: 'current_return', label: '현재 수익률' },
+                { type: 2, style: 4, custom_id: 'sell_all', label: '전체 매도' },
+            ],
+        },
+        // 역할 A — Row 2: 경주마, 완화, 초공격 scalp, 전략(하위 메뉴 진입)
+        {
+            type: 1,
+            components: [
+                { type: 2, style: 2, custom_id: 'race_horse_toggle', label: '경주마 ON/OFF' },
+                { type: 2, style: 2, custom_id: 'relax_toggle', label: '기준 완화' },
+                { type: 2, style: 1, custom_id: 'independent_scalp_start', label: '초공격 scalp' },
+                { type: 2, style: 2, custom_id: 'independent_scalp_stop', label: 'scalp 중지' },
+                { type: 2, style: 1, custom_id: 'strategy_menu', label: '전략' },
+            ],
+        },
+        // 역할 A — Row 3: 현재전략, 최근스킵, 최근체결 + 역할 C 1개
+        {
+            type: 1,
+            components: [
+                { type: 2, style: 1, custom_id: 'strategy_view_config', label: '현재전략' },
+                { type: 2, style: 2, custom_id: 'strategy_skip_recent', label: '최근스킵' },
+                { type: 2, style: 2, custom_id: 'strategy_buy_recent', label: '최근체결' },
+                { type: 2, style: 2, custom_id: 'health', label: '헬스' },
+                { type: 2, style: 4, custom_id: 'admin_emergency_menu', label: '비상 제어' },
+            ],
+        },
+        // 역할 B — Row 4: AI 타점, 시황, 급등주, 주요지표, 거래 부재 진단
+        {
+            type: 1,
+            components: [
+                { type: 2, style: 1, custom_id: 'ai_analysis', label: 'AI 타점 분석' },
+                { type: 2, style: 1, custom_id: 'analyst_get_prompt', label: '시황 요약' },
+                { type: 2, style: 2, custom_id: 'analyst_scan_vol', label: '급등주 분석' },
+                { type: 2, style: 2, custom_id: 'analyst_indicators', label: '주요지표' },
+                { type: 2, style: 2, custom_id: 'analyst_diagnose_no_trade', label: '거래 부재 진단' },
+            ],
+        },
+        // 역할 B + C — Row 5: 로직 제안, 조언자, 일일 로그, API 사용량, 시스템 업데이트
+        {
+            type: 1,
+            components: [
+                { type: 2, style: 2, custom_id: 'analyst_suggest_logic', label: '로직 수정안 제안' },
+                { type: 2, style: 2, custom_id: 'analyst_advisor_one_liner', label: '조언자의 한마디' },
+                { type: 2, style: 2, custom_id: 'daily_log_analysis', label: '하루치 로그 분석' },
+                { type: 2, style: 2, custom_id: 'api_usage_monitor', label: 'API 사용량' },
+                { type: 2, style: 1, custom_id: 'admin_git_pull_restart', label: '시스템 업데이트' },
+            ],
+        },
     ];
 }
+/** 전략 하위 메뉴: SAFE / A-보수적 / A-균형형 / A-적극형 (strategy_menu 클릭 시에만 표시) */
+function buildStrategySubmenuComponents() {
+    return [
+        {
+            type: 1,
+            components: [
+                { type: 2, style: 2, custom_id: 'strategy_safe', label: 'SAFE' },
+                { type: 2, style: 2, custom_id: 'strategy_conservative', label: 'A-보수적' },
+                { type: 2, style: 2, custom_id: 'strategy_balanced', label: 'A-균형형' },
+                { type: 2, style: 2, custom_id: 'strategy_active', label: 'A-적극형' },
+            ],
+        },
+    ];
+}
+/** 역할 C 비상 제어 하위 메뉴: 프로세스 정리 / 강제 종료 / 프로세스 재기동 (admin_emergency_menu 클릭 시에만 표시) */
+function buildEmergencySubmenuComponents() {
+    return [
+        {
+            type: 1,
+            components: [
+                { type: 2, style: 2, custom_id: 'admin_cleanup_processes', label: '비상 프로세스 정리' },
+                { type: 2, style: 4, custom_id: 'admin_force_kill_bot', label: '강제 종료(taskkill)' },
+                { type: 2, style: 2, custom_id: 'admin_simple_restart', label: '프로세스 재기동' },
+            ],
+        },
+    ];
+}
+/** 패널 복구: content + components 반드시 적용. 성공 시 true, 실패 시 false. 진단 로그는 LogUtil.logWarn/logError로 항상 출력 */
 async function restorePanel(channel) {
-    console.log('[discord] startup panel restore');
+    const panelContent = [
+        '🎮 **자동매매 통제 패널**',
+        '',
+        '**역할 A — 현장 지휘관** (엔진 제어 · 실시간 상태 · 체결 보고)',
+        '**역할 B — 정보 분석가** (AI 실시간 타점 분석 · 시황 요약 · 주요지표 · 거래 부재 진단)',
+        '**역할 C — 서버 관리자** (시스템 업데이트 · 프로세스 재기동)',
+    ].join('\n');
+    const components = buildPanelComponents();
+    const rows = Array.isArray(components) ? components.length : 0;
+    const counts = Array.isArray(components)
+        ? components.map((r) => (Array.isArray(r?.components) ? r.components.length : 0))
+        : [];
+    const countsStr = counts.join(',');
+    const firstIds = Array.isArray(components)
+        ? components.slice(0, 2).map((r) => (r?.components?.[0]?.custom_id ?? '—')).join(',')
+        : '—';
+    const invalidRows = rows > 5 || rows === 0;
+    const invalidCounts = counts.some((c) => c > 5 || c === 0);
+    if (invalidRows || invalidCounts) {
+        panelRestoreFail('COMPONENTS_INVALID', new Error('rows or button count out of limit'), { rows, counts: countsStr });
+    }
+    else {
+        panelRestoreWarn('COMPONENTS_BUILT', { rows, counts: countsStr, firstIds });
+    }
     let panelData = {};
     try {
         if (fs.existsSync(PANEL_FILE)) {
-            panelData = JSON.parse(fs.readFileSync(PANEL_FILE, 'utf8'));
+            const raw = fs.readFileSync(PANEL_FILE, 'utf8');
+            panelData = JSON.parse(raw);
+            panelRestoreWarn('STATE_LOADED', {
+                found: true,
+                channelId: panelData.channelId,
+                messageId: panelData.panelMessageId,
+                updatedAt: panelData.updatedAt ?? null,
+            });
+        }
+        else {
+            panelRestoreWarn('STATE_LOADED', { found: false, reason: 'no state file' });
         }
     }
-    catch (_) { }
+    catch (e) {
+        panelRestoreFail('STATE_LOAD_FAIL', e, { panelFile: PANEL_FILE });
+    }
+    panelRestoreWarn('START', {
+        channelId: channel?.id,
+        savedPanelMessageId: panelData.panelMessageId ?? null,
+        savedChannelId: panelData.channelId ?? null,
+        panelFile: PANEL_FILE,
+    });
     const dir = path_1.default.join(process.cwd(), 'state');
     if (!fs.existsSync(dir))
         fs.mkdirSync(dir, { recursive: true });
-    let msg;
-    if (panelData.panelMessageId) {
+    const channelIdMatch = panelData.channelId && String(panelData.channelId) === String(channel.id);
+    const hasSavedMessage = !!(panelData.panelMessageId && channelIdMatch);
+    if (panelData.panelMessageId && !channelIdMatch) {
+        panelRestoreWarn('CHANNEL_MISMATCH', { savedChannelId: panelData.channelId, currentChannelId: channel.id, willSendNew: true });
+    }
+    if (hasSavedMessage) {
+        const messageId = panelData.panelMessageId;
+        panelRestoreWarn('FETCH_EXISTING', { channelId: channel.id, messageId });
+        let msg;
         try {
-            msg = await channel.messages.fetch(panelData.panelMessageId);
-            console.log('[discord] startup panel found');
-            await msg.edit({ content: '🎮 자동매매 통제 패널 (역할 A/B/C)', components: buildPanelComponents() });
-            console.log('[discord] startup panel updated');
+            msg = await channel.messages.fetch(messageId);
+            panelRestoreWarn('FETCH_EXISTING_OK', { messageId });
         }
-        catch (_) {
-            msg = await channel.send({ content: '🎮 자동매매 통제 패널 (역할 A/B/C)', components: buildPanelComponents() });
-            console.log('[discord] startup panel created');
+        catch (e) {
+            panelRestoreFail('FETCH_EXISTING_FAIL', e, { messageId });
+            // fall through to SEND_NEW
+        }
+        if (msg) {
+            try {
+                panelRestoreWarn('EDIT_START', { messageId: msg.id, contentLen: panelContent.length, rows });
+                await msg.edit({ content: panelContent, components });
+                panelRestoreWarn('EDIT_OK', { messageId: msg.id });
+                try {
+                    fs.writeFileSync(PANEL_FILE, JSON.stringify({ channelId: channel.id, panelMessageId: msg.id }));
+                    panelRestoreWarn('STATE_SAVE_OK', { channelId: channel.id, messageId: msg.id });
+                }
+                catch (saveErr) {
+                    panelRestoreFail('STATE_SAVE_FAIL', saveErr, { after: 'edit', channelId: channel.id, messageId: msg.id });
+                }
+                panelRestoreWarn('DONE', { restored: true, mode: 'edit', panelMessageId: msg.id });
+                return true;
+            }
+            catch (e) {
+                panelRestoreFail('EDIT_FAIL', e, { messageId: msg.id, contentLen: panelContent.length, rows });
+            }
         }
     }
-    else {
-        msg = await channel.send({ content: '🎮 자동매매 통제 패널 (역할 A/B/C)', components: buildPanelComponents() });
-        console.log('[discord] startup panel created');
-    }
+    panelRestoreWarn('SEND_NEW_START', { channelId: channel.id, contentLen: panelContent.length, rows });
     try {
-        fs.writeFileSync(PANEL_FILE, JSON.stringify({ channelId: channel.id, panelMessageId: msg.id }));
+        const msg = await channel.send({ content: panelContent, components });
+        panelRestoreWarn('SEND_NEW_OK', { messageId: msg.id });
+        try {
+            fs.writeFileSync(PANEL_FILE, JSON.stringify({ channelId: channel.id, panelMessageId: msg.id }));
+            panelRestoreWarn('STATE_SAVE_OK', { channelId: channel.id, messageId: msg.id });
+        }
+        catch (saveErr) {
+            panelRestoreFail('STATE_SAVE_FAIL', saveErr, { after: 'send', channelId: channel.id, messageId: msg.id });
+        }
+        panelRestoreWarn('DONE', { restored: true, mode: 'new', panelMessageId: msg.id, restartMessageSeparate: true });
+        return true;
     }
     catch (e) {
-        console.warn('[discord] panel state save failed:', e.message);
+        panelRestoreFail('SEND_NEW_FAIL', e, { channelId: channel.id, contentLen: panelContent.length, rows });
+        panelRestoreWarn('DONE', { restored: false, reason: 'send_failed' });
+        return false;
     }
 }
-async function sendRestartMessage(channel) {
+/** 재기동 안내 메시지. panelRestored=true일 때만 "패널 상태 : 복구 완료" 표시 */
+async function sendRestartMessage(channel, panelRestored) {
     if (startupMessageSent)
         return;
+    const panelStatus = panelRestored ? '복구 완료' : '복구 실패 (로그 확인)';
+    panelRestoreWarn('RESTART_MESSAGE', { panelRestored, panelStatusText: panelStatus });
     try {
         const text = [
             '🚀 **시스템 재기동 되었습니다**',
@@ -272,14 +437,15 @@ async function sendRestartMessage(channel) {
             'Market Bot       : 연결 확인',
             'API Server       : 정상',
             '',
-            '패널 상태 : 복구 완료',
+            `패널 상태 : ${panelStatus}`,
         ].join('\n');
-        await channel.send({ content: text });
+        const restartMsg = await channel.send({ content: text });
         startupMessageSent = true;
-        console.log('[discord] restart notification sent');
+        panelRestoreWarn('RESTART_MESSAGE_SENT', { restartMessageId: restartMsg?.id ?? null, panelRestored });
     }
     catch (e) {
-        console.error('[discord-operator] Restart message send failed:', e.message);
+        panelRestoreFail('RESTART_MESSAGE_FAIL', e, { panelRestored });
+        LogUtil_1.LogUtil.logError(LOG_TAG, 'Restart message send failed', { message: e.message });
     }
 }
 async function handleButton(interaction) {
@@ -304,9 +470,22 @@ async function handleButton(interaction) {
                 await AuditLogService_1.AuditLogService.log({ userId, command: 'sell_all', timestamp: new Date().toISOString(), success: true, approved: true, orderCreated: true });
                 await interaction.update({ content: `전체 매도: ${result?.message ?? '완료'}`, components: [] }).catch(() => { });
             }
+            else if (consumed.command === 'admin_cleanup_processes') {
+                const result = await api('/api/admin/cleanup-processes', { method: 'POST', body: { userId }, userId });
+                await AuditLogService_1.AuditLogService.log({ userId, command: 'admin_cleanup_processes', timestamp: new Date().toISOString(), success: !!result?.ok });
+                LogUtil_1.LogUtil.logWarn(LOG_TAG, 'admin_cleanup_processes executed', { userId, ok: result?.ok, summary: result?.summary });
+                await interaction.update({ content: result?.summary ?? result?.error ?? '처리 완료', components: [] }).catch(() => { });
+            }
+            else if (consumed.command === 'admin_force_kill_bot') {
+                const result = await api('/api/admin/force-kill-bot', { method: 'POST', body: { userId }, userId });
+                await AuditLogService_1.AuditLogService.log({ userId, command: 'admin_force_kill_bot', timestamp: new Date().toISOString(), success: !!result?.ok });
+                LogUtil_1.LogUtil.logWarn(LOG_TAG, 'admin_force_kill_bot executed', { userId, ok: result?.ok, killed: result?.killed });
+                await interaction.update({ content: result?.summary ?? result?.error ?? '처리 완료', components: [] }).catch(() => { });
+            }
         }
         catch (e) {
             await AuditLogService_1.AuditLogService.log({ userId, command: consumed.command, timestamp: new Date().toISOString(), success: false, errorCode: e.message });
+            LogUtil_1.LogUtil.logError(LOG_TAG, 'confirm flow failed', { command: consumed.command, userId, error: e.message });
             await interaction.update({ content: `오류: ${e.message}`, components: [] }).catch(() => { });
         }
         return;
@@ -316,6 +495,71 @@ async function handleButton(interaction) {
         ConfirmFlow_1.ConfirmFlow.cancel(tokenId);
         await interaction.deferUpdate().catch(() => { });
         await interaction.update({ content: '취소되었습니다.', components: [] }).catch(() => { });
+        return;
+    }
+    // 전략 하위 메뉴: "전략" 버튼 클릭 시에만 SAFE / A-보수적 / A-균형형 / A-적극형 노출
+    if (customId === 'strategy_menu') {
+        await interaction.reply({
+            content: '**전략 선택** — 아래에서 모드를 선택하세요.',
+            components: buildStrategySubmenuComponents(),
+            ephemeral: true,
+        }).catch(() => { });
+        return;
+    }
+    // 엔진 가동 버튼 (확인 없이 즉시 API 호출)
+    if (customId === 'engine_start') {
+        const ctx = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
+        if (!PermissionService_1.PermissionService.can(ctx, 'engine_start')) {
+            await interaction.reply({ content: '권한 없음 (엔진 가동은 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
+            return;
+        }
+        await interaction.deferReply({ ephemeral: true }).catch(() => { });
+        try {
+            const result = await api('/api/engine/start', {
+                method: 'POST',
+                body: { userId, updatedBy: 'discord' },
+                userId,
+            });
+            await AuditLogService_1.AuditLogService.log({ userId, command: 'engine_start', timestamp: new Date().toISOString(), success: !!result?.success });
+            await interaction.editReply({ content: result?.message ?? '엔진 가동 요청됨' }).catch(() => { });
+        }
+        catch (e) {
+            await interaction.editReply({ content: `오류: ${e.message}` }).catch(() => { });
+        }
+        return;
+    }
+    // 즉시 정지 — 2단계 확인
+    if (customId === 'engine_stop') {
+        const ctx = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
+        if (!PermissionService_1.PermissionService.can(ctx, 'engine_stop')) {
+            await interaction.reply({ content: '권한 없음 (즉시 정지는 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
+            return;
+        }
+        const confirmToken = ConfirmFlow_1.ConfirmFlow.create(userId, 'engine_stop');
+        await interaction.reply({
+            content: '⚠️ 엔진 정지하려면 확인 버튼을 누르세요. (5분 내)',
+            components: [
+                { type: 1, components: [{ type: 2, style: 3, custom_id: `confirm_${confirmToken}`, label: '확인' }, { type: 2, style: 4, custom_id: `cancel_${confirmToken}`, label: '취소' }] },
+            ],
+            ephemeral: true,
+        }).catch(() => { });
+        return;
+    }
+    // 전체 매도 — 2단계 확인
+    if (customId === 'sell_all') {
+        const ctx = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
+        if (!PermissionService_1.PermissionService.can(ctx, 'sell_all')) {
+            await interaction.reply({ content: '권한 없음 (전체 매도는 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
+            return;
+        }
+        const confirmToken = ConfirmFlow_1.ConfirmFlow.create(userId, 'sell_all');
+        await interaction.reply({
+            content: '⚠️ 전량 시장가 매도하려면 확인 버튼을 누르세요. (5분 내)',
+            components: [
+                { type: 1, components: [{ type: 2, style: 3, custom_id: `confirm_${confirmToken}`, label: '확인' }, { type: 2, style: 4, custom_id: `cancel_${confirmToken}`, label: '취소' }] },
+            ],
+            ephemeral: true,
+        }).catch(() => { });
         return;
     }
     const strategyModeMap = {
@@ -404,6 +648,248 @@ async function handleButton(interaction) {
         }
         catch (e) {
             await interaction.editReply({ content: `오류: ${e.message}` }).catch(() => { });
+        }
+        return;
+    }
+    // ——— 역할 A: 경주마, 기준 완화, 초공격 scalp (market-bot proxy) ———
+    if (customId === 'race_horse_toggle') {
+        const ctxRh = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
+        if (!PermissionService_1.PermissionService.can(ctxRh, 'race_horse_toggle')) {
+            await interaction.reply({ content: '권한 없음 (경주마 모드는 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
+            return;
+        }
+        await interaction.deferReply({ ephemeral: true }).catch(() => { });
+        try {
+            const result = await api('/api/race-horse-toggle', { method: 'POST' });
+            const msg = result?.active ? '🏇 경주마 모드를 예약했습니다. 오전 9시에 자산 50% 투입.' : '❄️ 경주마 모드 OFF';
+            await interaction.editReply({ content: result?.message || msg }).catch(() => { });
+        }
+        catch (e) {
+            await interaction.editReply({ content: `오류 또는 미연동: ${e.message}` }).catch(() => { });
+        }
+        return;
+    }
+    if (customId === 'relax_toggle') {
+        const ctxRelax = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
+        if (!PermissionService_1.PermissionService.can(ctxRelax, 'relax_toggle')) {
+            await interaction.reply({ content: '권한 없음 (기준 완화는 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
+            return;
+        }
+        await interaction.deferReply({ ephemeral: true }).catch(() => { });
+        try {
+            const status = await api('/api/relax-status');
+            const remainingMs = status?.remainingMs ?? 0;
+            const ONE_HOUR_MS = 60 * 60 * 1000;
+            if (remainingMs > 0) {
+                const remainingMin = Math.ceil(remainingMs / 60000);
+                const isUnderOneHour = remainingMs < ONE_HOUR_MS;
+                await interaction.editReply({
+                    content: isUnderOneHour
+                        ? `완화 적용 중. 남은 시간: ${remainingMin}분. 연장하려면 아래 버튼을 누르세요.`
+                        : `기준 완화 적용 중. (남은 시간: ${remainingMin}분)`,
+                    components: isUnderOneHour
+                        ? [{ type: 1, components: [{ type: 2, style: 1, custom_id: 'extend_relax', label: '연장 (4시간)' }] }]
+                        : [],
+                }).catch(() => { });
+            }
+            else {
+                await api('/api/relax', { method: 'POST', body: { ttlMs: 4 * 60 * 60 * 1000 } });
+                await interaction.editReply({ content: '🔓 매매 엔진 기준 완화를 4시간 적용했습니다.' }).catch(() => { });
+            }
+        }
+        catch (e) {
+            await interaction.editReply({ content: `오류 또는 미연동: ${e.message}` }).catch(() => { });
+        }
+        return;
+    }
+    if (customId === 'extend_relax') {
+        const ctxExRelax = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
+        if (!PermissionService_1.PermissionService.can(ctxExRelax, 'extend_relax')) {
+            await interaction.reply({ content: '권한 없음.', ephemeral: true }).catch(() => { });
+            return;
+        }
+        await interaction.deferReply({ ephemeral: true }).catch(() => { });
+        try {
+            await api('/api/relax-extend', { method: 'POST' });
+            await interaction.editReply({ content: '🔓 기준 완화 4시간 연장되었습니다.' }).catch(() => { });
+        }
+        catch (e) {
+            await interaction.editReply({ content: `오류: ${e.message}` }).catch(() => { });
+        }
+        return;
+    }
+    if (customId === 'independent_scalp_start') {
+        const ctxScalp = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
+        if (!PermissionService_1.PermissionService.can(ctxScalp, 'independent_scalp_start')) {
+            await interaction.reply({ content: '권한 없음 (초공격 scalp는 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
+            return;
+        }
+        await interaction.deferReply({ ephemeral: true }).catch(() => { });
+        try {
+            const status = await api('/api/independent-scalp-status');
+            if (status?.isRunning && (status?.remainingMs ?? 0) > 0) {
+                const remainingMin = Math.ceil((status.remainingMs ?? 0) / 60000);
+                const under1h = (status.remainingMs ?? 0) < 60 * 60 * 1000;
+                await interaction.editReply({
+                    content: `독립 스캘프 가동 중. (남은 시간: ${remainingMin}분)${under1h ? ' 연장 가능.' : ''}`,
+                    components: under1h ? [{ type: 1, components: [{ type: 2, style: 1, custom_id: 'extend_independent_scalp', label: '연장 (3시간)' }] }] : [],
+                }).catch(() => { });
+            }
+            else {
+                const result = await api('/api/independent-scalp-start', { method: 'POST' });
+                const min = result?.remainingMs != null ? Math.ceil(result.remainingMs / 60000) : 180;
+                await interaction.editReply({ content: result?.success ? `🚀 초공격 스캘프 3시간 가동. (남은 시간: ${min}분)` : '요청 실패 또는 미연동.' }).catch(() => { });
+            }
+        }
+        catch (e) {
+            await interaction.editReply({ content: `오류 또는 미연동: ${e.message}` }).catch(() => { });
+        }
+        return;
+    }
+    if (customId === 'independent_scalp_stop') {
+        const ctxScalpStop = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
+        if (!PermissionService_1.PermissionService.can(ctxScalpStop, 'independent_scalp_stop')) {
+            await interaction.reply({ content: '권한 없음.', ephemeral: true }).catch(() => { });
+            return;
+        }
+        await interaction.deferReply({ ephemeral: true }).catch(() => { });
+        try {
+            await api('/api/independent-scalp-stop', { method: 'POST' });
+            await interaction.editReply({ content: '🛑 초공격 스캘프 중지됨.' }).catch(() => { });
+        }
+        catch (e) {
+            await interaction.editReply({ content: `오류: ${e.message}` }).catch(() => { });
+        }
+        return;
+    }
+    if (customId === 'extend_independent_scalp') {
+        const ctxExScalp = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
+        if (!PermissionService_1.PermissionService.can(ctxExScalp, 'extend_independent_scalp')) {
+            await interaction.reply({ content: '권한 없음.', ephemeral: true }).catch(() => { });
+            return;
+        }
+        await interaction.deferReply({ ephemeral: true }).catch(() => { });
+        try {
+            const result = await api('/api/independent-scalp-extend', { method: 'POST' });
+            const min = result?.remainingMs != null ? Math.ceil(result.remainingMs / 60000) : 0;
+            await interaction.editReply({ content: result?.success ? `연장 완료. (남은 시간: ${min}분)` : '연장 불가 (1시간 미만일 때만 가능)' }).catch(() => { });
+        }
+        catch (e) {
+            await interaction.editReply({ content: `오류: ${e.message}` }).catch(() => { });
+        }
+        return;
+    }
+    // ——— 역할 B: AI 타점, 거래 부재 진단, 로직 제안, 조언자, 일일 로그, API 사용량 (market-bot proxy) ———
+    if (customId === 'ai_analysis') {
+        await interaction.deferReply({ ephemeral: true }).catch(() => { });
+        try {
+            const result = await api('/api/ai_analysis');
+            const text = (result?.content ?? '').slice(0, 2000) || '데이터 없음';
+            await interaction.editReply({ content: text }).catch(() => { });
+        }
+        catch (e) {
+            await interaction.editReply({ content: `오류 또는 미연동: ${e.message}` }).catch(() => { });
+        }
+        return;
+    }
+    if (customId === 'analyst_diagnose_no_trade' || customId === 'analyst_suggest_logic') {
+        const ctxDiag = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
+        if (!PermissionService_1.PermissionService.can(ctxDiag, customId)) {
+            await interaction.reply({ content: '권한 없음 (거래 부재 진단/로직 제안은 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
+            return;
+        }
+        await interaction.deferReply({ ephemeral: true }).catch(() => { });
+        try {
+            const path = customId === 'analyst_diagnose_no_trade' ? '/api/analyst/diagnose_no_trade' : '/api/analyst/suggest_logic';
+            const embedJson = await api(path);
+            const embed = new discord_js_1.MessageEmbed(embedJson);
+            await interaction.editReply({ embeds: [embed] }).catch(() => { });
+        }
+        catch (e) {
+            await interaction.editReply({ content: `오류 또는 미연동: ${e.message}` }).catch(() => { });
+        }
+        return;
+    }
+    if (customId === 'analyst_advisor_one_liner' || customId === 'daily_log_analysis' || customId === 'api_usage_monitor') {
+        await interaction.deferReply({ ephemeral: true }).catch(() => { });
+        try {
+            const path = customId === 'analyst_advisor_one_liner'
+                ? '/api/analyst/advisor_one_liner'
+                : customId === 'daily_log_analysis'
+                    ? '/api/analyst/daily_log_analysis'
+                    : '/api/analyst/api_usage_monitor';
+            const result = await api(path);
+            const text = (result?.content ?? '').slice(0, 2000) || '데이터 없음';
+            await interaction.editReply({ content: text }).catch(() => { });
+        }
+        catch (e) {
+            await interaction.editReply({ content: `오류 또는 미연동: ${e.message}` }).catch(() => { });
+        }
+        return;
+    }
+    // 비상 제어 하위 메뉴 진입 (역할 C)
+    if (customId === 'admin_emergency_menu') {
+        const ctxEm = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
+        if (!PermissionService_1.PermissionService.can(ctxEm, 'admin_emergency_menu')) {
+            await interaction.reply({ content: '권한 없음 (서버 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
+            return;
+        }
+        await interaction.reply({
+            content: '**비상 제어** — 프로세스 정리 / 강제 종료 / 재기동 (강제 종료·정리는 확인 후 실행)',
+            components: buildEmergencySubmenuComponents(),
+            ephemeral: true,
+        }).catch(() => { });
+        return;
+    }
+    // 비상 프로세스 정리 — 2단계 확인 후 실행
+    if (customId === 'admin_cleanup_processes') {
+        const ctxCp = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
+        if (!PermissionService_1.PermissionService.can(ctxCp, 'admin_cleanup_processes')) {
+            await interaction.reply({ content: '권한 없음 (서버 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
+            return;
+        }
+        const confirmToken = ConfirmFlow_1.ConfirmFlow.create(userId, 'admin_cleanup_processes');
+        await interaction.reply({
+            content: '⚠️ **비상 프로세스 정리** — stale lock·좀비 프로세스 정리할까요? (5분 내 확인)',
+            components: [
+                { type: 1, components: [{ type: 2, style: 3, custom_id: `confirm_${confirmToken}`, label: '확인' }, { type: 2, style: 4, custom_id: `cancel_${confirmToken}`, label: '취소' }] },
+            ],
+            ephemeral: true,
+        }).catch(() => { });
+        return;
+    }
+    // 강제 종료(taskkill) — 2단계 확인 후 실행
+    if (customId === 'admin_force_kill_bot') {
+        const ctxFk = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
+        if (!PermissionService_1.PermissionService.can(ctxFk, 'admin_force_kill_bot')) {
+            await interaction.reply({ content: '권한 없음 (서버 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
+            return;
+        }
+        const confirmToken = ConfirmFlow_1.ConfirmFlow.create(userId, 'admin_force_kill_bot');
+        await interaction.reply({
+            content: '⚠️ **강제 종료** — market-bot / discord-operator 프로세스를 taskkill 할까요? (5분 내 확인)',
+            components: [
+                { type: 1, components: [{ type: 2, style: 3, custom_id: `confirm_${confirmToken}`, label: '확인' }, { type: 2, style: 4, custom_id: `cancel_${confirmToken}`, label: '취소' }] },
+            ],
+            ephemeral: true,
+        }).catch(() => { });
+        return;
+    }
+    // ——— 역할 C: 시스템 업데이트, 프로세스 재기동 (market-bot proxy) ———
+    if (customId === 'admin_git_pull_restart' || customId === 'admin_simple_restart') {
+        const ctxAdmin = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
+        if (!PermissionService_1.PermissionService.can(ctxAdmin, customId)) {
+            await interaction.reply({ content: '권한 없음 (서버 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
+            return;
+        }
+        await interaction.deferReply({ ephemeral: true }).catch(() => { });
+        const path = customId === 'admin_git_pull_restart' ? '/api/admin/git-pull-restart' : '/api/admin/simple-restart';
+        try {
+            const result = await api(path, { method: 'POST' });
+            await interaction.editReply({ content: result?.content ?? '요청 처리됨' }).catch(() => { });
+        }
+        catch (e) {
+            await interaction.editReply({ content: `오류 또는 미연동: ${e.message}` }).catch(() => { });
         }
         return;
     }
@@ -659,23 +1145,34 @@ async function handleSlash(interaction) {
 }
 // upbit-bot 메인 사용 시: 보고 권한 단일화 — 수익률/현재 상태 보고는 upbit-bot만. 여기서는 가동 완료 로그만.
 client.once('ready', async () => {
-    console.log('[discord-operator] 서비스 가동 완료');
+    const clientId = client.user?.id ?? null;
+    panelRestoreWarn('READY', { start: true, clientId, channelId: channelId ?? null });
+    LogUtil_1.LogUtil.logInfo(LOG_TAG, '서비스 가동 완료');
     await registerSlashCommands(client);
     const chId = channelId;
     if (chId) {
         try {
-            const channel = await client.channels.fetch(chId).catch(() => null);
+            const channel = await client.channels.fetch(chId).catch((err) => {
+                panelRestoreFail('CHANNEL_FETCH_FAIL', err, { channelId: chId });
+                return null;
+            });
             if (channel && channel.isText()) {
-                await sendRestartMessage(channel);
-                await restorePanel(channel);
+                // 1) 먼저 통제 패널(버튼) 복구. 성공 시에만 "복구 완료" 표시.
+                const panelRestored = await restorePanel(channel);
+                // 2) 그 다음 재기동 안내 메시지 전송 (패널 복구 결과 반영)
+                await sendRestartMessage(channel, panelRestored);
             }
             else {
-                console.error('[discord-operator] Channel fetch failed or not text channel:', chId);
+                LogUtil_1.LogUtil.logError(LOG_TAG, 'Channel fetch failed or not text channel', { channelId: chId });
             }
         }
         catch (e) {
-            console.error('[discord-operator] Startup sequence failed:', e.message);
+            panelRestoreFail('READY_SEQUENCE_FAIL', e, { channelId: chId });
+            LogUtil_1.LogUtil.logError(LOG_TAG, 'Startup sequence failed', { message: e.message });
         }
+    }
+    else {
+        panelRestoreWarn('READY', { skip: true, reason: 'no channelId' });
     }
     if (adminId)
         scheduleHourlyHealthDm();
@@ -691,21 +1188,21 @@ client.on('interactionCreate', async (interaction) => {
         }
     }
     catch (e) {
-        console.error('[discord-operator]', e);
+        LogUtil_1.LogUtil.logError(LOG_TAG, 'interaction handle error', { message: e.message });
     }
 });
 async function startDiscordOperator() {
-    console.log('[DISCORD_LOGIN] trying login');
+    LogUtil_1.LogUtil.logInfo(LOG_TAG, 'trying login');
     await client.login(token);
-    console.log('[DISCORD_LOGIN_SUCCESS]');
+    LogUtil_1.LogUtil.logInfo(LOG_TAG, 'login success');
 }
 function getClient() {
     return client;
 }
 if (require.main === module) {
-    console.log('[DISCORD_BOOT] standalone startDiscordOperator()');
+    LogUtil_1.LogUtil.logInfo(LOG_TAG, 'standalone startDiscordOperator()');
     startDiscordOperator().catch((err) => {
-        console.error('[DISCORD_BOOT][startup_error]', err);
+        LogUtil_1.LogUtil.logError(LOG_TAG, 'startup_error', { message: err.message });
         process.exit(1);
     });
 }

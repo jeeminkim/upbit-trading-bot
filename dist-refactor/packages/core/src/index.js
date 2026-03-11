@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.StrategyExplainService = exports.GeminiAnalysisService = exports.MarketSnapshotService = exports.closeDb = exports.getDbSync = exports.ConfirmFlow = exports.CACHE_TTL = exports.TtlCache = exports.HealthReportService = exports.AuditLogService = exports.ProfitCalculationService = exports.PermissionService = exports.CircuitBreakerService = exports.EngineStateService = exports.EventBus = void 0;
+exports.StrategyExplainService = exports.GeminiAnalysisService = exports.MarketSnapshotService = exports.closeDb = exports.getDbSync = exports.LogUtil = exports.ConfirmFlow = exports.CACHE_TTL = exports.TtlCache = exports.HealthReportService = exports.AuditLogService = exports.ProfitCalculationService = exports.PermissionService = exports.CircuitBreakerService = exports.EngineStateService = exports.EventBus = void 0;
 var EventBus_1 = require("./EventBus");
 Object.defineProperty(exports, "EventBus", { enumerable: true, get: function () { return EventBus_1.EventBus; } });
 var EngineStateService_1 = require("./EngineStateService");
@@ -20,6 +20,8 @@ Object.defineProperty(exports, "TtlCache", { enumerable: true, get: function () 
 Object.defineProperty(exports, "CACHE_TTL", { enumerable: true, get: function () { return TtlCache_1.CACHE_TTL; } });
 var ConfirmFlow_1 = require("./ConfirmFlow");
 Object.defineProperty(exports, "ConfirmFlow", { enumerable: true, get: function () { return ConfirmFlow_1.ConfirmFlow; } });
+var LogUtil_1 = require("./LogUtil");
+Object.defineProperty(exports, "LogUtil", { enumerable: true, get: function () { return LogUtil_1.LogUtil; } });
 var AuditLogDb_1 = require("./AuditLogDb");
 Object.defineProperty(exports, "getDbSync", { enumerable: true, get: function () { return AuditLogDb_1.getDbSync; } });
 Object.defineProperty(exports, "closeDb", { enumerable: true, get: function () { return AuditLogDb_1.closeDb; } });

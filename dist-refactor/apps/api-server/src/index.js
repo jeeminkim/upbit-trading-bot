@@ -19,9 +19,13 @@ const GeminiAnalysisService_1 = require("../../../packages/core/src/GeminiAnalys
 const CircuitBreakerService_1 = require("../../../packages/core/src/CircuitBreakerService");
 const AuditLogService_1 = require("../../../packages/core/src/AuditLogService");
 const StrategyExplainService_1 = require("../../../packages/core/src/StrategyExplainService");
+const LogUtil_1 = require("../../../packages/core/src/LogUtil");
 const errors_1 = require("../../../packages/shared/src/errors");
+const child_process_1 = require("child_process");
+const fs_1 = __importDefault(require("fs"));
 const app = (0, express_1.default)();
 exports.app = app;
+const API_LOG_TAG = 'API';
 const httpServer = (0, http_1.createServer)(app);
 exports.httpServer = httpServer;
 const io = new socket_io_1.Server(httpServer);
@@ -122,6 +126,198 @@ app.post('/api/sell-all', async (req, res) => {
     if (r.ok && r.data)
         return res.json(r.data);
     res.status(r.status || 503).json(r.data || { success: false, message: 'Engine (market-bot) unavailable' });
+});
+// ——— Discord 역할 A/B/C 패널용: market-bot proxy (engine-standalone에 구현된 discordHandlers 호출) ———
+app.post('/api/race-horse-toggle', async (_req, res) => {
+    const r = await proxyToMarketBot('/race-horse-toggle', { method: 'POST' });
+    if (r.ok && r.data)
+        return res.json(r.data);
+    res.status(r.status || 503).json(r.data || { error: 'market-bot unavailable' });
+});
+app.get('/api/relax-status', async (_req, res) => {
+    const r = await proxyToMarketBot('/relax-status');
+    if (r.ok && r.data)
+        return res.json(r.data);
+    res.status(r.status || 503).json(r.data || { remainingMs: 0 });
+});
+app.post('/api/relax', async (req, res) => {
+    const r = await proxyToMarketBot('/relax', { method: 'POST', body: req.body || {} });
+    if (r.ok && r.data)
+        return res.json(r.data);
+    res.status(r.status || 503).json(r.data || { error: 'market-bot unavailable' });
+});
+app.post('/api/relax-extend', async (_req, res) => {
+    const r = await proxyToMarketBot('/relax-extend', { method: 'POST' });
+    if (r.ok && r.data)
+        return res.json(r.data);
+    res.status(r.status || 503).json(r.data || { error: 'market-bot unavailable' });
+});
+app.get('/api/independent-scalp-status', async (_req, res) => {
+    const r = await proxyToMarketBot('/independent-scalp-status');
+    if (r.ok && r.data)
+        return res.json(r.data);
+    res.status(r.status || 503).json(r.data || { isRunning: false, remainingMs: 0 });
+});
+app.post('/api/independent-scalp-start', async (_req, res) => {
+    const r = await proxyToMarketBot('/independent-scalp-start', { method: 'POST' });
+    if (r.ok && r.data)
+        return res.json(r.data);
+    res.status(r.status || 503).json(r.data || { success: false });
+});
+app.post('/api/independent-scalp-stop', async (_req, res) => {
+    const r = await proxyToMarketBot('/independent-scalp-stop', { method: 'POST' });
+    if (r.ok && r.data)
+        return res.json(r.data);
+    res.status(r.status || 503).json(r.data || { success: false });
+});
+app.post('/api/independent-scalp-extend', async (_req, res) => {
+    const r = await proxyToMarketBot('/independent-scalp-extend', { method: 'POST' });
+    if (r.ok && r.data)
+        return res.json(r.data);
+    res.status(r.status || 503).json(r.data || { success: false });
+});
+app.get('/api/analyst/diagnose_no_trade', async (_req, res) => {
+    const r = await proxyToMarketBot('/api/analyst/diagnose_no_trade');
+    if (r.ok && r.data)
+        return res.json(r.data);
+    res.status(r.status || 503).json(r.data || { error: 'market-bot unavailable' });
+});
+app.get('/api/analyst/suggest_logic', async (_req, res) => {
+    const r = await proxyToMarketBot('/api/analyst/suggest_logic');
+    if (r.ok && r.data)
+        return res.json(r.data);
+    res.status(r.status || 503).json(r.data || { error: 'market-bot unavailable' });
+});
+app.get('/api/analyst/advisor_one_liner', async (_req, res) => {
+    const r = await proxyToMarketBot('/api/analyst/advisor_one_liner');
+    if (r.ok && r.data)
+        return res.json(r.data);
+    res.status(r.status || 503).json(r.data || { content: '' });
+});
+app.get('/api/analyst/daily_log_analysis', async (_req, res) => {
+    const r = await proxyToMarketBot('/api/analyst/daily_log_analysis');
+    if (r.ok && r.data)
+        return res.json(r.data);
+    res.status(r.status || 503).json(r.data || { content: '' });
+});
+app.get('/api/analyst/api_usage_monitor', async (_req, res) => {
+    const r = await proxyToMarketBot('/api/analyst/api_usage_monitor');
+    if (r.ok && r.data)
+        return res.json(r.data);
+    res.status(r.status || 503).json(r.data || { content: '' });
+});
+app.get('/api/ai_analysis', async (_req, res) => {
+    const r = await proxyToMarketBot('/api/ai_analysis');
+    if (r.ok && r.data)
+        return res.json(r.data);
+    res.status(r.status || 503).json(r.data || { content: '' });
+});
+app.post('/api/admin/git-pull-restart', async (_req, res) => {
+    const r = await proxyToMarketBot('/admin/git-pull-restart', { method: 'POST' });
+    if (r.ok && r.data)
+        return res.json(r.data);
+    res.status(r.status || 503).json(r.data || { error: 'market-bot unavailable' });
+});
+app.post('/api/admin/simple-restart', async (_req, res) => {
+    const r = await proxyToMarketBot('/admin/simple-restart', { method: 'POST' });
+    if (r.ok && r.data)
+        return res.json(r.data);
+    res.status(r.status || 503).json(r.data || { error: 'market-bot unavailable' });
+});
+/** 비상: stale .server.lock 제거, 프로젝트 관련 좀비 정리 (api-server에서 실행, 본인 PID는 건드리지 않음) */
+app.post('/api/admin/cleanup-processes', (req, res) => {
+    const userId = (req.body && req.body.userId) || req.headers?.['x-user-id'] || 'api';
+    const root = process.cwd();
+    const lockPath = path_1.default.join(root, '.server.lock');
+    const lines = [];
+    try {
+        if (fs_1.default.existsSync(lockPath)) {
+            try {
+                const raw = fs_1.default.readFileSync(lockPath, 'utf8');
+                const data = JSON.parse(raw);
+                const pid = typeof data.pid === 'number' ? data.pid : parseInt(String(data.pid), 10);
+                try {
+                    process.kill(pid, 0);
+                }
+                catch (_) {
+                    fs_1.default.unlinkSync(lockPath);
+                    lines.push(`stale .server.lock 제거 (pid ${pid} 미존재)`);
+                    LogUtil_1.LogUtil.logWarn(API_LOG_TAG, 'admin_cleanup_processes: stale lock removed', { userId, pid });
+                }
+            }
+            catch (e) {
+                fs_1.default.unlinkSync(lockPath);
+                lines.push('손상된 .server.lock 제거');
+                LogUtil_1.LogUtil.logWarn(API_LOG_TAG, 'admin_cleanup_processes: corrupted lock removed', { message: e.message });
+            }
+        }
+        else {
+            lines.push('.server.lock 없음');
+        }
+        const summary = lines.length ? lines.join('\n') : '정리할 항목 없음';
+        LogUtil_1.LogUtil.logWarn(API_LOG_TAG, 'admin_cleanup_processes completed', { userId, summary });
+        return res.json({ ok: true, summary });
+    }
+    catch (e) {
+        LogUtil_1.LogUtil.logError(API_LOG_TAG, 'admin_cleanup_processes failed', { userId, message: e.message });
+        return res.status(500).json({ ok: false, error: e.message });
+    }
+});
+/** PM2 앱 이름으로 허용된 대상만 (market-bot, discord-operator). api-server 자신은 제외 */
+const FORCE_KILL_APP_NAMES = ['market-bot', 'discord-operator'];
+/** 비상: PM2 목록에서 market-bot, discord-operator만 taskkill (Windows). api-server는 kill하지 않음 */
+app.post('/api/admin/force-kill-bot', (req, res) => {
+    const userId = (req.body && req.body.userId) || req.headers?.['x-user-id'] || 'api';
+    const selfPid = process.pid;
+    const killed = [];
+    const failed = [];
+    try {
+        let list = [];
+        try {
+            const out = (0, child_process_1.execSync)('pm2 jlist', { encoding: 'utf8', timeout: 5000 });
+            const arr = JSON.parse(out || '[]');
+            list = (Array.isArray(arr) ? arr : []).map((p) => ({
+                pid: typeof p.pid === 'number' ? p.pid : parseInt(String(p.pid), 10),
+                name: p.name || p.pm2_env?.name,
+            })).filter((p) => p.pid && !Number.isNaN(p.pid));
+        }
+        catch (_) {
+            LogUtil_1.LogUtil.logWarn(API_LOG_TAG, 'admin_force_kill_bot: pm2 jlist failed, skip', { userId });
+            return res.json({ ok: true, summary: 'PM2 목록 조회 실패. 수동으로 pm2 list 후 taskkill 하세요.', killed: [] });
+        }
+        for (const p of list) {
+            const name = (p.name || '').toString();
+            if (!FORCE_KILL_APP_NAMES.includes(name))
+                continue;
+            if (p.pid === selfPid)
+                continue;
+            try {
+                if (process.platform === 'win32') {
+                    (0, child_process_1.execSync)(`taskkill /PID ${p.pid} /F`, { timeout: 3000 });
+                }
+                else {
+                    process.kill(p.pid, 'SIGKILL');
+                }
+                killed.push(p.pid);
+                LogUtil_1.LogUtil.logWarn(API_LOG_TAG, 'admin_force_kill_bot: process killed', { userId, pid: p.pid, name });
+            }
+            catch (e) {
+                failed.push(p.pid);
+                LogUtil_1.LogUtil.logWarn(API_LOG_TAG, 'admin_force_kill_bot: kill failed', { userId, pid: p.pid, name, message: e.message });
+            }
+        }
+        const summary = killed.length
+            ? `종료됨: ${killed.join(', ')}${failed.length ? ` / 실패: ${failed.join(', ')}` : ''}`
+            : failed.length
+                ? `실패: ${failed.join(', ')}`
+                : '종료할 프로세스 없음 (market-bot, discord-operator만 대상)';
+        LogUtil_1.LogUtil.logWarn(API_LOG_TAG, 'admin_force_kill_bot completed', { userId, killed, failed });
+        return res.json({ ok: true, summary, killed, failed });
+    }
+    catch (e) {
+        LogUtil_1.LogUtil.logError(API_LOG_TAG, 'admin_force_kill_bot failed', { userId, message: e.message });
+        return res.status(500).json({ ok: false, error: e.message });
+    }
 });
 app.get('/api/strategy-config', (_req, res) => {
     try {

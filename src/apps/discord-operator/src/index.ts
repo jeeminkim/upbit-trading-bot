@@ -1,6 +1,31 @@
 import path from 'path';
 require('dotenv').config({ path: path.join(process.cwd(), '.env') });
 
+import { Client, MessageEmbed } from 'discord.js';
+const discord = require('discord.js') as any;
+const Intents = discord.Intents;
+import { EventBus } from '../../../packages/core/src/EventBus';
+import { PermissionService } from '../../../packages/core/src/PermissionService';
+import { AuditLogService } from '../../../packages/core/src/AuditLogService';
+import { HealthReportService } from '../../../packages/core/src/HealthReportService';
+import { ConfirmFlow } from '../../../packages/core/src/ConfirmFlow';
+import { LogUtil } from '../../../packages/core/src/LogUtil';
+import { AppErrorCode } from '../../../packages/shared/src/errors';
+import type { PermissionContext } from '../../../packages/shared/src/types';
+
+const LOG_TAG = 'DISCORD_OP';
+
+/** PANEL_RESTORE 진단 로그 — LOG_LEVEL 무관하게 항상 출력 (logWarn 사용) */
+function panelRestoreWarn(tag: string, detail: Record<string, unknown>): void {
+  LogUtil.logWarn(LOG_TAG, `[PANEL_RESTORE][${tag}] ${JSON.stringify(detail)}`);
+}
+/** PANEL_RESTORE 실패 로그 — error + stack 일부 */
+function panelRestoreFail(tag: string, err: unknown, extra?: Record<string, unknown>): void {
+  const e = err as Error;
+  const stack = e?.stack ? e.stack.split('\n').slice(0, 4).join(' | ') : '';
+  LogUtil.logError(LOG_TAG, `[PANEL_RESTORE][${tag}] ${e?.message ?? String(err)}`, { ...extra, stack });
+}
+
 // ===== DISCORD OPERATOR BOOT DIAGNOSTIC (timestamp 항상 포함) =====
 LogUtil.logInfo(LOG_TAG, 'process start', { cwd: process.cwd(), pid: process.pid, node: process.version });
 
@@ -17,20 +42,6 @@ if (LogUtil.isDebugLog()) {
   LogUtil.logDebug(LOG_TAG, 'CHANNEL_ID exists: ' + !!(process.env.DISCORD_OPERATOR_CHANNEL_ID || process.env.CHANNEL_ID));
   LogUtil.logDebug(LOG_TAG, 'ADMIN_ID exists: ' + !!(process.env.ADMIN_ID || process.env.DISCORD_ADMIN_ID));
 }
-
-import { Client, MessageEmbed } from 'discord.js';
-const discord = require('discord.js') as any;
-const Intents = discord.Intents;
-import { EventBus } from '../../../packages/core/src/EventBus';
-import { PermissionService } from '../../../packages/core/src/PermissionService';
-import { AuditLogService } from '../../../packages/core/src/AuditLogService';
-import { HealthReportService } from '../../../packages/core/src/HealthReportService';
-import { ConfirmFlow } from '../../../packages/core/src/ConfirmFlow';
-import { LogUtil } from '../../../packages/core/src/LogUtil';
-import { AppErrorCode } from '../../../packages/shared/src/errors';
-import type { PermissionContext } from '../../../packages/shared/src/types';
-
-const LOG_TAG = 'DISCORD_OP';
 
 // 필수: 토큰과 채널 ID만 검증 (DISCORD_OPERATOR_CHANNEL_ID 또는 CHANNEL_ID)
 const token = (process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || '').trim();
@@ -247,65 +258,145 @@ function scheduleHourlyHealthDm(): void {
 const fs = require('fs') as typeof import('fs');
 const PANEL_FILE = path.join(process.cwd(), 'state', 'discord-panel.json');
 
-/** 역할 A(현장 지휘관) / B(정보 분석가) / C(서버 관리자) — 한 메시지 내 최대 5 row, row당 5버튼. 전략 4종은 메인에 두지 않고 "전략" 버튼 클릭 시에만 노출. */
-function buildPanelComponents(): any[] {
-  return [
-    // 역할 A — Row 1: 엔진 제어 + 상태/수익률 + 전체 매도
-    {
-      type: 1,
-      components: [
-        { type: 2, style: 3, custom_id: 'engine_start', label: '엔진 가동' },
-        { type: 2, style: 4, custom_id: 'engine_stop', label: '즉시 정지' },
-        { type: 2, style: 2, custom_id: 'current_state', label: '현재 상태' },
-        { type: 2, style: 2, custom_id: 'current_return', label: '현재 수익률' },
-        { type: 2, style: 4, custom_id: 'sell_all', label: '전체 매도' },
-      ],
-    },
-    // 역할 A — Row 2: 경주마, 완화, 초공격 scalp, 전략(하위 메뉴 진입)
-    {
-      type: 1,
-      components: [
-        { type: 2, style: 2, custom_id: 'race_horse_toggle', label: '경주마 ON/OFF' },
-        { type: 2, style: 2, custom_id: 'relax_toggle', label: '기준 완화' },
-        { type: 2, style: 1, custom_id: 'independent_scalp_start', label: '초공격 scalp' },
-        { type: 2, style: 2, custom_id: 'independent_scalp_stop', label: 'scalp 중지' },
-        { type: 2, style: 1, custom_id: 'strategy_menu', label: '전략' },
-      ],
-    },
-    // 역할 A — Row 3: 현재전략, 최근스킵, 최근체결 + 역할 C 1개
-    {
-      type: 1,
-      components: [
-        { type: 2, style: 1, custom_id: 'strategy_view_config', label: '현재전략' },
-        { type: 2, style: 2, custom_id: 'strategy_skip_recent', label: '최근스킵' },
-        { type: 2, style: 2, custom_id: 'strategy_buy_recent', label: '최근체결' },
-        { type: 2, style: 2, custom_id: 'health', label: '헬스' },
-        { type: 2, style: 4, custom_id: 'admin_emergency_menu', label: '비상 제어' },
-      ],
-    },
-    // 역할 B — Row 4: AI 타점, 시황, 급등주, 주요지표, 거래 부재 진단
-    {
-      type: 1,
-      components: [
-        { type: 2, style: 1, custom_id: 'ai_analysis', label: 'AI 타점 분석' },
-        { type: 2, style: 1, custom_id: 'analyst_get_prompt', label: '시황 요약' },
-        { type: 2, style: 2, custom_id: 'analyst_scan_vol', label: '급등주 분석' },
-        { type: 2, style: 2, custom_id: 'analyst_indicators', label: '주요지표' },
-        { type: 2, style: 2, custom_id: 'analyst_diagnose_no_trade', label: '거래 부재 진단' },
-      ],
-    },
-    // 역할 B + C — Row 5: 로직 제안, 조언자, 일일 로그, API 사용량, 시스템 업데이트
-    {
-      type: 1,
-      components: [
-        { type: 2, style: 2, custom_id: 'analyst_suggest_logic', label: '로직 수정안 제안' },
-        { type: 2, style: 2, custom_id: 'analyst_advisor_one_liner', label: '조언자의 한마디' },
-        { type: 2, style: 2, custom_id: 'daily_log_analysis', label: '하루치 로그 분석' },
-        { type: 2, style: 2, custom_id: 'api_usage_monitor', label: 'API 사용량' },
-        { type: 2, style: 1, custom_id: 'admin_git_pull_restart', label: '시스템 업데이트' },
-      ],
-    },
-  ];
+// --- 패널 UI 모델: 역할 기반 선언형 정의 (1=PRIMARY, 2=SECONDARY, 3=SUCCESS, 4=DANGER) ---
+const DISCORD_BUTTON_STYLE = { PRIMARY: 1, SECONDARY: 2, SUCCESS: 3, DANGER: 4 } as const;
+
+interface PanelButtonSpec {
+  custom_id: string;
+  label: string;
+  style: 1 | 2 | 3 | 4;
+}
+
+interface PanelRoleSpec {
+  id: string;
+  title: string;
+  description: string;
+  buttons: PanelButtonSpec[];
+}
+
+/** 역할별 버튼 정의 — 순서대로 row에 채워짐. row 배치는 ROW_LAYOUT으로 제어 */
+const PANEL_ROLES: PanelRoleSpec[] = [
+  {
+    id: 'A',
+    title: '역할 A — 현장 지휘관',
+    description: '엔진 제어 · 실시간 상태 · 체결 보고 · 공격/정지/매도',
+    buttons: [
+      { custom_id: 'engine_start', label: '엔진 가동', style: DISCORD_BUTTON_STYLE.SUCCESS },
+      { custom_id: 'engine_stop', label: '즉시 정지', style: DISCORD_BUTTON_STYLE.DANGER },
+      { custom_id: 'current_state', label: '현재 상태', style: DISCORD_BUTTON_STYLE.SECONDARY },
+      { custom_id: 'current_return', label: '현재 수익률', style: DISCORD_BUTTON_STYLE.SECONDARY },
+      { custom_id: 'sell_all', label: '전체 매도', style: DISCORD_BUTTON_STYLE.DANGER },
+      { custom_id: 'race_horse_toggle', label: '경주마 ON/OFF', style: DISCORD_BUTTON_STYLE.SECONDARY },
+      { custom_id: 'relax_toggle', label: '기준 완화', style: DISCORD_BUTTON_STYLE.SECONDARY },
+      { custom_id: 'independent_scalp_start', label: '초공격 scalp', style: DISCORD_BUTTON_STYLE.PRIMARY },
+      { custom_id: 'independent_scalp_stop', label: 'scalp 중지', style: DISCORD_BUTTON_STYLE.SECONDARY },
+      { custom_id: 'strategy_menu', label: '전략', style: DISCORD_BUTTON_STYLE.PRIMARY },
+      { custom_id: 'strategy_view_config', label: '현재전략', style: DISCORD_BUTTON_STYLE.PRIMARY },
+      { custom_id: 'strategy_skip_recent', label: '최근스킵', style: DISCORD_BUTTON_STYLE.SECONDARY },
+      { custom_id: 'strategy_buy_recent', label: '최근체결', style: DISCORD_BUTTON_STYLE.SECONDARY },
+    ],
+  },
+  {
+    id: 'B',
+    title: '역할 B — 정보 분석가',
+    description: 'AI 타점 · 시황 요약 · 급등주/주요지표 · 거래 부재 진단 · 로직 제안 · 조언 · 로그 분석',
+    buttons: [
+      { custom_id: 'ai_analysis', label: 'AI 타점 분석', style: DISCORD_BUTTON_STYLE.PRIMARY },
+      { custom_id: 'analyst_get_prompt', label: '시황 요약', style: DISCORD_BUTTON_STYLE.PRIMARY },
+      { custom_id: 'analyst_scan_vol', label: '급등주 분석', style: DISCORD_BUTTON_STYLE.SECONDARY },
+      { custom_id: 'analyst_indicators', label: '주요지표', style: DISCORD_BUTTON_STYLE.SECONDARY },
+      { custom_id: 'analyst_diagnose_no_trade', label: '거래 부재 진단', style: DISCORD_BUTTON_STYLE.SECONDARY },
+      { custom_id: 'analyst_suggest_logic', label: '로직 수정안 제안', style: DISCORD_BUTTON_STYLE.SECONDARY },
+      { custom_id: 'analyst_advisor_one_liner', label: '조언자의 한마디', style: DISCORD_BUTTON_STYLE.SECONDARY },
+      { custom_id: 'daily_log_analysis', label: '하루치 로그 분석', style: DISCORD_BUTTON_STYLE.SECONDARY },
+      { custom_id: 'api_usage_monitor', label: 'API 사용량', style: DISCORD_BUTTON_STYLE.SECONDARY },
+    ],
+  },
+  {
+    id: 'C',
+    title: '역할 C — 서버 관리자',
+    description: '시스템 업데이트 · 비상 제어 · 헬스 · 프로세스 재기동',
+    buttons: [
+      { custom_id: 'health', label: '헬스', style: DISCORD_BUTTON_STYLE.SECONDARY },
+      { custom_id: 'admin_emergency_menu', label: '비상 제어', style: DISCORD_BUTTON_STYLE.DANGER },
+      { custom_id: 'admin_git_pull_restart', label: '시스템 업데이트', style: DISCORD_BUTTON_STYLE.PRIMARY },
+    ],
+  },
+];
+
+/** 각 row를 어떤 역할·몇 개씩 채울지. 5 row × 최대 5버튼. */
+const ROW_LAYOUT: { roleId: string; count: number }[][] = [
+  [{ roleId: 'A', count: 5 }],
+  [{ roleId: 'A', count: 5 }],
+  [{ roleId: 'A', count: 3 }, { roleId: 'C', count: 2 }],
+  [{ roleId: 'B', count: 5 }],
+  [{ roleId: 'B', count: 4 }, { roleId: 'C', count: 1 }],
+];
+
+export interface PanelModel {
+  roles: PanelRoleSpec[];
+  lastUpdatedAt?: string;
+}
+
+/** UI 모델 생성 (마지막 갱신 시각 선택) */
+function buildPanelModel(lastUpdatedAt?: string): PanelModel {
+  return { roles: PANEL_ROLES, lastUpdatedAt };
+}
+
+/** 패널 메시지 content — 역할별 제목/설명 + 마지막 갱신 시각 */
+function buildPanelContent(model: PanelModel): string {
+  const lines: string[] = [];
+  if (model.lastUpdatedAt) {
+    try {
+      const d = new Date(model.lastUpdatedAt);
+      const kst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
+      const kstStr = kst.toISOString().slice(0, 19).replace('T', ' ');
+      lines.push(`🎮 **자동매매 통제 패널** · 마지막 갱신: ${kstStr} KST`);
+    } catch (_) {
+      lines.push('🎮 **자동매매 통제 패널**');
+    }
+  } else {
+    lines.push('🎮 **자동매매 통제 패널**');
+  }
+  lines.push('');
+  for (const r of model.roles) {
+    lines.push(`**${r.title}**`);
+    lines.push(r.description);
+    lines.push('');
+  }
+  return lines.join('\n').trimEnd();
+}
+
+/** 역할 인덱스 */
+const ROLE_INDEX: Record<string, number> = { A: 0, B: 1, C: 2 };
+
+/** 모델에서 Discord ActionRow[] 생성 (역할 단위 배치). 최대 5 row, row당 5버튼. */
+function buildPanelComponents(model: PanelModel): any[] {
+  const roles = model.roles;
+  const indices: Record<string, number> = { A: 0, B: 0, C: 0 };
+  const rows: any[] = [];
+  for (const rowSpec of ROW_LAYOUT) {
+    const components: any[] = [];
+    for (const { roleId, count } of rowSpec) {
+      const ri = ROLE_INDEX[roleId];
+      const role = ri != null ? roles[ri] : null;
+      if (!role) continue;
+      let idx = indices[roleId] ?? 0;
+      for (let i = 0; i < count && idx < role.buttons.length; i++, idx++) {
+        const b = role.buttons[idx];
+        components.push({ type: 2, style: b.style, custom_id: b.custom_id, label: b.label });
+      }
+      indices[roleId] = idx;
+    }
+    if (components.length > 0) rows.push({ type: 1, components });
+    if (rows.length >= 5) break;
+  }
+  return rows;
+}
+
+/** 기존 호환: model 없이 호출 시 기본 모델로 빌드 */
+function buildPanelComponentsLegacy(): any[] {
+  return buildPanelComponents(buildPanelModel());
 }
 
 /** 전략 하위 메뉴: SAFE / A-보수적 / A-균형형 / A-적극형 (strategy_menu 클릭 시에만 표시) */
@@ -337,48 +428,156 @@ function buildEmergencySubmenuComponents(): any[] {
   ];
 }
 
-async function restorePanel(channel: any): Promise<void> {
-  LogUtil.logInfo(LOG_TAG, 'startup panel restore');
-  let panelData: { channelId?: string; panelMessageId?: string } = {};
+export type PanelRestoreResult = { restored: boolean; mode?: 'edit' | 'new' };
+
+/** 패널 복구/생성: 모델 → content + components 빌드 후 edit 또는 send. 타이밍(ms)·fallback·상태 명시. */
+async function restoreOrCreatePanelMessage(channel: any): Promise<PanelRestoreResult> {
+  const t0 = Date.now();
+  const lastUpdatedAt = new Date().toISOString();
+  const model = buildPanelModel(lastUpdatedAt);
+  let panelContent: string;
+  let components: any[];
+
+  try {
+    panelContent = buildPanelContent(model);
+  } catch (e) {
+    panelRestoreFail('CONTENT_BUILD_FAIL', e, {});
+    panelContent = '🎮 **자동매매 통제 패널**\n\n(콘텐츠 생성 오류. 로그 확인.)';
+  }
+
+  try {
+    components = buildPanelComponents(model);
+  } catch (e) {
+    panelRestoreFail('COMPONENTS_BUILD_FAIL', e, { willUseFallback: true });
+    components = [{ type: 1, components: [{ type: 2, style: 2, custom_id: 'health', label: '헬스' }] }];
+  }
+
+  const rows = Array.isArray(components) ? components.length : 0;
+  const counts = Array.isArray(components)
+    ? components.map((r: any) => (Array.isArray(r?.components) ? r.components.length : 0))
+    : [];
+  const countsStr = counts.join(',');
+  const firstIds = Array.isArray(components)
+    ? components.slice(0, 2).map((r: any) => (r?.components?.[0]?.custom_id ?? '—')).join(',')
+    : '—';
+
+  const invalidRows = rows > 5 || rows === 0;
+  const invalidCounts = counts.some((c: number) => c > 5 || c === 0);
+  if (invalidRows || invalidCounts) {
+    panelRestoreFail('COMPONENTS_INVALID', new Error('rows or button count out of limit'), { rows, counts: countsStr });
+  } else {
+    panelRestoreWarn('PANEL_LAYOUT', { rows, counts: countsStr, firstIds });
+  }
+
+  const tState = Date.now();
+  let panelData: { channelId?: string; panelMessageId?: string; updatedAt?: string } = {};
   try {
     if (fs.existsSync(PANEL_FILE)) {
-      panelData = JSON.parse(fs.readFileSync(PANEL_FILE, 'utf8'));
+      const raw = fs.readFileSync(PANEL_FILE, 'utf8');
+      panelData = JSON.parse(raw);
+      panelRestoreWarn('STATE_LOADED', {
+        found: true,
+        channelId: panelData.channelId,
+        messageId: panelData.panelMessageId,
+        updatedAt: panelData.updatedAt ?? null,
+        stateLoadMs: Date.now() - tState,
+      });
+    } else {
+      panelRestoreWarn('STATE_LOADED', { found: false, reason: 'no state file', stateLoadMs: Date.now() - tState });
     }
-  } catch (_) {}
+  } catch (e) {
+    panelRestoreFail('STATE_LOAD_FAIL', e, { panelFile: PANEL_FILE });
+  }
+
+  panelRestoreWarn('PANEL_RESTORE_START', {
+    channelId: channel?.id,
+    savedPanelMessageId: panelData.panelMessageId ?? null,
+    savedChannelId: panelData.channelId ?? null,
+    panelFile: PANEL_FILE,
+  });
+
   const dir = path.join(process.cwd(), 'state');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  let msg: any;
-  const panelContent = [
-    '🎮 **자동매매 통제 패널**',
-    '',
-    '**역할 A — 현장 지휘관** (엔진 제어 · 실시간 상태 · 체결 보고)',
-    '**역할 B — 정보 분석가** (AI 실시간 타점 분석 · 시황 요약 · 주요지표 · 거래 부재 진단)',
-    '**역할 C — 서버 관리자** (시스템 업데이트 · 프로세스 재기동)',
-  ].join('\n');
 
-  if (panelData.panelMessageId) {
-    try {
-      msg = await channel.messages.fetch(panelData.panelMessageId);
-      LogUtil.logInfo(LOG_TAG, 'startup panel found');
-      await msg.edit({ content: panelContent, components: buildPanelComponents() });
-      LogUtil.logInfo(LOG_TAG, 'startup panel updated');
-    } catch (_) {
-      msg = await channel.send({ content: panelContent, components: buildPanelComponents() });
-      LogUtil.logInfo(LOG_TAG, 'startup panel created');
-    }
-  } else {
-    msg = await channel.send({ content: panelContent, components: buildPanelComponents() });
-    LogUtil.logInfo(LOG_TAG, 'startup panel created');
+  const channelIdMatch = panelData.channelId && String(panelData.channelId) === String(channel.id);
+  let hasSavedMessage = !!(panelData.panelMessageId && channelIdMatch);
+  if (panelData.panelMessageId && !channelIdMatch) {
+    panelRestoreWarn('CHANNEL_MISMATCH', { savedChannelId: panelData.channelId, currentChannelId: channel.id, willSendNew: true });
+    hasSavedMessage = false;
   }
+
+  if (hasSavedMessage) {
+    const messageId = panelData.panelMessageId!;
+    panelRestoreWarn('FETCH_EXISTING', { channelId: channel.id, messageId });
+    const tFetch = Date.now();
+    let msg: any;
+    try {
+      msg = await channel.messages.fetch(messageId);
+      panelRestoreWarn('FETCH_EXISTING_OK', { messageId, fetchMs: Date.now() - tFetch });
+    } catch (e) {
+      panelRestoreFail('FETCH_EXISTING_FAIL', e, { messageId, fetchMs: Date.now() - tFetch });
+      panelRestoreWarn('MESSAGE_DELETED_OR_INACCESSIBLE', { messageId, willSendNew: true });
+      hasSavedMessage = false;
+    }
+    if (msg) {
+      try {
+        panelRestoreWarn('EDIT_START', { messageId: msg.id, contentLen: panelContent.length, rows });
+        const tEdit = Date.now();
+        await msg.edit({ content: panelContent, components });
+        panelRestoreWarn('EDIT_OK', { messageId: msg.id, editMs: Date.now() - tEdit });
+        try {
+          fs.writeFileSync(PANEL_FILE, JSON.stringify({ channelId: channel.id, panelMessageId: msg.id, updatedAt: lastUpdatedAt }));
+          panelRestoreWarn('STATE_SAVE_OK', { channelId: channel.id, messageId: msg.id });
+        } catch (saveErr) {
+          panelRestoreFail('STATE_SAVE_FAIL', saveErr, { after: 'edit', channelId: channel.id, messageId: msg.id });
+        }
+        panelRestoreWarn('PANEL_RESTORE_DONE', {
+          restored: true,
+          mode: 'edit',
+          panelMessageId: msg.id,
+          restoreDurationMs: Date.now() - t0,
+        });
+        return { restored: true, mode: 'edit' };
+      } catch (e) {
+        panelRestoreFail('EDIT_FAIL', e, { messageId: msg.id, contentLen: panelContent.length, rows });
+      }
+    }
+  }
+
+  panelRestoreWarn('SEND_NEW_START', { channelId: channel.id, contentLen: panelContent.length, rows });
   try {
-    fs.writeFileSync(PANEL_FILE, JSON.stringify({ channelId: channel.id, panelMessageId: msg.id }));
+    const msg = await channel.send({ content: panelContent, components });
+    panelRestoreWarn('SEND_NEW_OK', { messageId: msg.id });
+    try {
+      fs.writeFileSync(PANEL_FILE, JSON.stringify({ channelId: channel.id, panelMessageId: msg.id, updatedAt: lastUpdatedAt }));
+      panelRestoreWarn('STATE_SAVE_OK', { channelId: channel.id, messageId: msg.id });
+    } catch (saveErr) {
+      panelRestoreFail('STATE_SAVE_FAIL', saveErr, { after: 'send', channelId: channel.id, messageId: msg.id });
+    }
+    panelRestoreWarn('PANEL_RESTORE_DONE', {
+      restored: true,
+      mode: 'new',
+      panelMessageId: msg.id,
+      restoreDurationMs: Date.now() - t0,
+    });
+    return { restored: true, mode: 'new' };
   } catch (e) {
-    LogUtil.logWarn(LOG_TAG, 'panel state save failed', { message: (e as Error).message });
+    panelRestoreFail('SEND_NEW_FAIL', e, { channelId: channel.id, contentLen: panelContent.length, rows });
+    panelRestoreWarn('PANEL_RESTORE_DONE', { restored: false, reason: 'send_failed', restoreDurationMs: Date.now() - t0 });
+    return { restored: false };
   }
 }
 
-async function sendRestartMessage(channel: any): Promise<void> {
+/** 재기동 안내 메시지. result에 따라 "패널 복구 완료 / 새 패널 생성 / 복구 실패" 명시 */
+async function sendRestartMessage(channel: any, result: PanelRestoreResult): Promise<void> {
   if (startupMessageSent) return;
+  const panelStatus =
+    result.restored === false
+      ? '복구 실패 (로그 확인)'
+      : result.mode === 'edit'
+        ? '복구 완료'
+        : '새 패널 생성';
+  panelRestoreWarn('RESTART_MESSAGE', { panelRestored: result.restored, mode: result.mode, panelStatusText: panelStatus });
   try {
     const text = [
       '🚀 **시스템 재기동 되었습니다**',
@@ -387,12 +586,13 @@ async function sendRestartMessage(channel: any): Promise<void> {
       'Market Bot       : 연결 확인',
       'API Server       : 정상',
       '',
-      '패널 상태 : 복구 완료',
+      `패널 상태 : ${panelStatus}`,
     ].join('\n');
-    await channel.send({ content: text });
+    const restartMsg = await channel.send({ content: text });
     startupMessageSent = true;
-    LogUtil.logInfo(LOG_TAG, 'restart notification sent');
+    panelRestoreWarn('RESTART_MESSAGE_SENT', { restartMessageId: restartMsg?.id ?? null, panelRestored: result.restored, panelStatus });
   } catch (e) {
+    panelRestoreFail('RESTART_MESSAGE_FAIL', e, { panelRestored: result.restored });
     LogUtil.logError(LOG_TAG, 'Restart message send failed', { message: (e as Error).message });
   }
 }
@@ -1079,21 +1279,31 @@ async function handleSlash(interaction: any): Promise<void> {
 
 // upbit-bot 메인 사용 시: 보고 권한 단일화 — 수익률/현재 상태 보고는 upbit-bot만. 여기서는 가동 완료 로그만.
 client.once('ready', async () => {
+  const clientId = (client as any).user?.id ?? null;
+  panelRestoreWarn('READY', { start: true, clientId, channelId: channelId ?? null });
   LogUtil.logInfo(LOG_TAG, '서비스 가동 완료');
   await registerSlashCommands(client);
   const chId = channelId;
   if (chId) {
     try {
-      const channel = await client.channels.fetch(chId).catch(() => null);
+      const channel = await client.channels.fetch(chId).catch((err: unknown) => {
+        panelRestoreFail('CHANNEL_FETCH_FAIL', err, { channelId: chId });
+        return null;
+      });
       if (channel && channel.isText()) {
-        await sendRestartMessage(channel);
-        await restorePanel(channel);
+        // 1) 먼저 통제 패널(버튼) 복구. edit 성공 → "복구 완료", send 성공 → "새 패널 생성", 실패 → "복구 실패"
+        const panelResult = await restoreOrCreatePanelMessage(channel);
+        // 2) 그 다음 재기동 안내 메시지 전송 (패널 복구 결과 반영)
+        await sendRestartMessage(channel, panelResult);
       } else {
         LogUtil.logError(LOG_TAG, 'Channel fetch failed or not text channel', { channelId: chId });
       }
     } catch (e) {
+      panelRestoreFail('READY_SEQUENCE_FAIL', e, { channelId: chId });
       LogUtil.logError(LOG_TAG, 'Startup sequence failed', { message: (e as Error).message });
     }
+  } else {
+    panelRestoreWarn('READY', { skip: true, reason: 'no channelId' });
   }
   if (adminId) scheduleHourlyHealthDm();
 });
