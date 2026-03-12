@@ -100,6 +100,72 @@ const ORCHESTRATOR = {
   normalizer_floor_score: undefined
 };
 
+/**
+ * Edge Layer — 신호 품질/체결 품질/리스크 품질 개선 (insertion between strategy signal and position sizing)
+ * USE_EDGE_LAYER=1 로 활성화. 모드: observe_only | soft_gate | hard_gate
+ */
+const EDGE_LAYER = {
+  enabled: process.env.USE_EDGE_LAYER === '1' || process.env.USE_EDGE_LAYER === 'true',
+  mode: (process.env.EDGE_LAYER_MODE || 'observe_only').toLowerCase(), // observe_only | soft_gate | hard_gate
+  edgeThreshold: Number(process.env.EDGE_THRESHOLD) || 0.55,
+  // TradeEdgeScore 가중치 (합 1.0)
+  weightSignalScore: 0.30,
+  weightRegimeScore: 0.25,
+  weightVolatilityFactor: 0.15,
+  weightLiquidityFactor: 0.15,
+  weightSlippageRiskInverse: 0.15,
+  // Breakout: 자산별 민감도 (SOL 강화, XRP 완화)
+  breakoutFactorByAsset: {
+    BTC: 1.0,
+    ETH: 1.0,
+    SOL: 1.2,
+    XRP: 0.8
+  },
+  // Volume surge: recent_10s / avg_10s_over_5m > threshold
+  volumeSurgeThresholdByAsset: {
+    BTC: 2.2,
+    ETH: 2.2,
+    SOL: 2.2,
+    XRP: 2.2
+  },
+  volumeSurgeNeutralFallback: 1.0,
+  // Liquidity: top3_bid_liquidity_krw > position_size_krw * multiplier
+  liquidityMultiplierByAsset: {
+    BTC: 3.0,
+    ETH: 3.0,
+    SOL: 3.5,
+    XRP: 4.0
+  },
+  // Orchestrator 정규화
+  normalizerMinSamples: 10,
+  normalizerStdEpsilon: 1e-6,
+  normalizerOutlierClamp: 3.0,
+  // 포지션 사이징: 자산별 기본 allocation (비율 0~1)
+  allocationByAsset: {
+    BTC: 0.15,
+    ETH: 0.15,
+    SOL: 0.10,
+    XRP: 0.10
+  },
+  // 초공격 스캘프 max allocation
+  aggressiveScalpMaxAllocation: 0.06,
+  // 운영 모드 multiplier (SAFE / BALANCED / ACTIVE). OPERATING_MODE env로 전환
+  operatingMode: (process.env.OPERATING_MODE || 'A_BALANCED').toUpperCase(),
+  modeMultiplier: {
+    SAFE: 0.6,
+    A_CONSERVATIVE: 0.6,
+    A_BALANCED: 1.0,
+    A_ACTIVE: 1.4
+  },
+  // 자산별 전략 프로파일 (signal weighting, threshold, liquidity sensitivity, volatility breakout, mean reversion weight)
+  assetProfile: {
+    BTC: { signalWeight: 1.0, liquiditySensitivity: 1.0, volatilityBreakout: 1.0, meanReversionWeight: 0.5 },
+    ETH: { signalWeight: 1.0, liquiditySensitivity: 1.0, volatilityBreakout: 1.0, meanReversionWeight: 0.5 },
+    SOL: { signalWeight: 1.0, liquiditySensitivity: 1.1, volatilityBreakout: 1.2, meanReversionWeight: 0.4 },
+    XRP: { signalWeight: 1.0, liquiditySensitivity: 1.1, volatilityBreakout: 0.8, meanReversionWeight: 0.7 }
+  }
+};
+
 /** 프로필에서 안전하게 숫자 가져오기 (null/undefined 시 기본값) */
 function getProfileNum(profile, key, fallback = 0) {
   const v = profile[key];
@@ -127,6 +193,7 @@ module.exports = {
   API_RETRY_MAX,
   API_RETRY_DELAY_MS,
   ORCHESTRATOR,
+  EDGE_LAYER,
   getProfileNum,
   clampWeight
 };

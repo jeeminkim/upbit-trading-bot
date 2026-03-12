@@ -150,34 +150,34 @@ exports.ROLE_PANEL_LAYOUT_SPEC = {
     C: [['health_check', 'emergency_control', 'api_usage', 'system_update']],
 };
 // ---------------------------------------------------------------------------
-// 버튼 정의 (key = custom_id, label/style 고정)
+// 버튼 정의 (key = custom_id, label = emoji+텍스트, style = 위험=DANGER / 시작=SUCCESS / 전략·실행=PRIMARY / 조회·분석=SECONDARY)
 // ---------------------------------------------------------------------------
 exports.PANEL_BUTTON_DEFINITIONS = {
-    engine_start: { label: '엔진 가동', style: exports.DISCORD_BUTTON_STYLE.SUCCESS },
-    engine_stop: { label: '즉시 정지', style: exports.DISCORD_BUTTON_STYLE.DANGER },
-    current_status: { label: '현재 상태', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
-    current_pnl: { label: '현재 수익률', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
-    sell_all: { label: '전체 매도', style: exports.DISCORD_BUTTON_STYLE.DANGER },
-    race_horse_toggle: { label: '경주마 ON/OFF', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
-    relax_threshold: { label: '기준 완화', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
-    scalp_attack: { label: '초공격 scalp', style: exports.DISCORD_BUTTON_STYLE.PRIMARY },
-    scalp_stop: { label: 'scalp 중지', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
-    strategy_menu: { label: '전략', style: exports.DISCORD_BUTTON_STYLE.PRIMARY },
-    current_strategy: { label: '현재전략', style: exports.DISCORD_BUTTON_STYLE.PRIMARY },
-    ai_entry_analysis: { label: 'AI 타점 분석', style: exports.DISCORD_BUTTON_STYLE.PRIMARY },
-    market_summary: { label: '시황 요약', style: exports.DISCORD_BUTTON_STYLE.PRIMARY },
-    surge_analysis: { label: '급등주 분석', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
-    key_indicators: { label: '주요지표', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
-    no_trade_diagnosis: { label: '거래 부재 진단', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
-    recent_scalp: { label: '최근스캘', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
-    recent_fills: { label: '최근체결', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
-    logic_suggestion: { label: '로직 수정안 제안', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
-    advisor_comment: { label: '조언자의 한마디', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
-    daily_log_analysis: { label: '하루치 로그 분석', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
-    health_check: { label: '헬스', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
-    emergency_control: { label: '비상 제어', style: exports.DISCORD_BUTTON_STYLE.DANGER },
-    api_usage: { label: 'API 사용량', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
-    system_update: { label: '시스템 업데이트', style: exports.DISCORD_BUTTON_STYLE.PRIMARY },
+    engine_start: { label: '🚀 엔진 가동', style: exports.DISCORD_BUTTON_STYLE.SUCCESS },
+    engine_stop: { label: '🛑 즉시 정지', style: exports.DISCORD_BUTTON_STYLE.DANGER },
+    current_status: { label: '📡 현재 상태', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
+    current_pnl: { label: '💰 현재 수익률', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
+    sell_all: { label: '🔻 전체 매도', style: exports.DISCORD_BUTTON_STYLE.DANGER },
+    race_horse_toggle: { label: '🐎 경주마 ON/OFF', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
+    relax_threshold: { label: '⚙️ 기준 완화', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
+    scalp_attack: { label: '⚡ 초공격 scalp', style: exports.DISCORD_BUTTON_STYLE.SUCCESS },
+    scalp_stop: { label: '⛔ scalp 중지', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
+    strategy_menu: { label: '🎯 전략', style: exports.DISCORD_BUTTON_STYLE.PRIMARY },
+    current_strategy: { label: '🧠 현재전략', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
+    ai_entry_analysis: { label: '🤖 AI 타점 분석', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
+    market_summary: { label: '🌍 시황 요약', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
+    surge_analysis: { label: '📈 급등주 분석', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
+    key_indicators: { label: '📊 주요지표', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
+    no_trade_diagnosis: { label: '🔍 거래 부재 진단', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
+    recent_scalp: { label: '⚡ 최근스캘', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
+    recent_fills: { label: '🧾 최근체결', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
+    logic_suggestion: { label: '🧩 로직 수정안 제안', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
+    advisor_comment: { label: '💬 조언자의 한마디', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
+    daily_log_analysis: { label: '📜 하루치 로그 분석', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
+    health_check: { label: '❤️ 헬스', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
+    emergency_control: { label: '🚨 비상 제어', style: exports.DISCORD_BUTTON_STYLE.DANGER },
+    api_usage: { label: '📡 API 사용량', style: exports.DISCORD_BUTTON_STYLE.SECONDARY },
+    system_update: { label: '🔄 시스템 업데이트', style: exports.DISCORD_BUTTON_STYLE.PRIMARY },
 };
 // ---------------------------------------------------------------------------
 // PANEL_LAYOUT_SPEC — 단일 메시지 모드(single)에서만 사용하는 실제 Discord row 배치 (최대 5 row)
@@ -485,13 +485,16 @@ function buildRolePanelComponents(role) {
 // Fallback 패널 (최소 버튼만)
 // ---------------------------------------------------------------------------
 function getFallbackComponents() {
+    const health = exports.PANEL_BUTTON_DEFINITIONS.health_check;
+    const emergency = exports.PANEL_BUTTON_DEFINITIONS.emergency_control;
+    const update = exports.PANEL_BUTTON_DEFINITIONS.system_update;
     return [
         {
             type: 1,
             components: [
-                { type: 2, style: exports.DISCORD_BUTTON_STYLE.SECONDARY, custom_id: 'health_check', label: '헬스' },
-                { type: 2, style: exports.DISCORD_BUTTON_STYLE.DANGER, custom_id: 'emergency_control', label: '비상 제어' },
-                { type: 2, style: exports.DISCORD_BUTTON_STYLE.PRIMARY, custom_id: 'system_update', label: '시스템 업데이트' },
+                { type: 2, style: health.style, custom_id: 'health_check', label: health.label },
+                { type: 2, style: emergency.style, custom_id: 'emergency_control', label: emergency.label },
+                { type: 2, style: update.style, custom_id: 'system_update', label: update.label },
             ],
         },
     ];

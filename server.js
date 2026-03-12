@@ -83,6 +83,10 @@ const discordBot = require('./lib/discordBot');
 const { MessageEmbed } = require('discord.js');
 const orchestrator = require('./lib/strategy/orchestrator');
 const raceHorsePolicy = require('./lib/strategy/raceHorsePolicy');
+const EdgeEstimator = require('./lib/strategy/edge/EdgeEstimator');
+const liquidityFilter = require('./lib/strategy/edge/liquidityFilter');
+const volumeSurge = require('./lib/strategy/edge/volumeSurge');
+const edgeMetrics = require('./lib/strategy/edge/edgeMetrics');
 const scalpRunner = require('./lib/scalp_independent/scalpRunner');
 const scalpState = require('./lib/scalp_independent/scalpState');
 const systemStatePersistence = require('./lib/systemStatePersistence');
@@ -902,6 +906,7 @@ function buildSnapshotFromOrderbook(orderbookItem, ticker, market) {
   const total = depthBid + depthAsk;
   const strength = total > 0 ? depthBid / total : 0.5;
   const obi = total > 0 ? (depthBid - depthAsk) / total : 0;
+  const top3BidKrw = units.slice(0, 3).reduce((s, u) => s + (parseFloat(u.bid_price) || 0) * (parseFloat(u.bid_size) || 0), 0);
   const kimpPct = market != null && state.kimpByMarket[market] != null ? state.kimpByMarket[market] : null;
   return {
     mid_price: mid,
@@ -912,6 +917,7 @@ function buildSnapshotFromOrderbook(orderbookItem, ticker, market) {
     spread_pct: spreadRatio * 100,
     topN_depth_bid: depthBid,
     topN_depth_ask: depthAsk,
+    top3_bid_liquidity_krw: top3BidKrw,
     strength_proxy_60s: strength,
     strength_for_score: strength,
     strength_peak_60s: strength,
@@ -1104,6 +1110,16 @@ async function runScalpCycle() {
       const mpiMultiplier = scalpEngine.getMpiPositionMultiplier(mpiScore);
 
       const ticker = tickerMap[market];
+      if (ticker && typeof volumeSurge.pushBucket === 'function') {
+        try {
+          const acc = Number(ticker.acc_trade_price_24h) || 0;
+          state.lastAccTradePrice24h = state.lastAccTradePrice24h || {};
+          const prev = state.lastAccTradePrice24h[market] != null ? state.lastAccTradePrice24h[market] : acc;
+          const volKrw = Math.max(0, acc - prev);
+          volumeSurge.pushBucket(state, market, volKrw);
+          state.lastAccTradePrice24h[market] = acc;
+        } catch (_) {}
+      }
       const snapshot = (USE_SIGNAL_ENGINE && signalEngineResult && state.lastSnapshots[market])
         ? state.lastSnapshots[market]
         : buildSnapshotFromOrderbook(obMap[market], ticker, market);
@@ -1690,6 +1706,37 @@ async function runOneTick() {
       const totalCoinEval = state.assets?.evaluationKrwForCoins ?? Math.max(0, (state.assets?.totalEvaluationKrw ?? 0) - (orderableKrw || 0));
       const scalpStateEntry = state.scalpState && state.scalpState[market] ? state.scalpState[market] : null;
       const snapshotForTier = state.lastSnapshots && state.lastSnapshots[market] ? state.lastSnapshots[market] : null;
+
+      let edgeBlock = false;
+      if (EdgeEstimator.isEnabled()) {
+        try {
+          const snapshot = state.lastSnapshots && state.lastSnapshots[market] ? state.lastSnapshots[market] : null;
+          let signalScore = orchResult.finalScore != null ? orchResult.finalScore : (orchResult.signal && orchResult.signal.score != null ? orchResult.signal.score : 0.5);
+          const edgeCfg = configDefault.EDGE_LAYER || {};
+          const profile = edgeCfg.assetProfile && edgeCfg.assetProfile[symbol] ? edgeCfg.assetProfile[symbol] : null;
+          if (profile && profile.signalWeight != null) signalScore = Math.max(0, Math.min(1, signalScore * profile.signalWeight));
+          const regimeScore = 0.5;
+          const top3Krw = snapshot && snapshot.top3_bid_liquidity_krw != null ? snapshot.top3_bid_liquidity_krw : 0;
+          const liquidityFactor = top3Krw > 0 ? Math.min(1, top3Krw / 5000000) : 0.5;
+          const spreadRatio = snapshot && snapshot.spread_ratio != null ? snapshot.spread_ratio : 0.001;
+          const slippageRiskInverse = Math.max(0, Math.min(1, 1 - spreadRatio * 100));
+          const edgeResult = EdgeEstimator.evaluate({
+            signalScore,
+            regimeScore,
+            volatilityFactor: 0.5,
+            liquidityFactor,
+            slippageRiskInverse
+          }, { mode: EdgeEstimator.getMode(), symbol });
+          if (edgeResult.decision === 'REJECT' && EdgeEstimator.getMode() === 'hard_gate') {
+            tradeLogger.logTag('거절', 'Edge ' + edgeResult.reasonCode, { market, edgeScore: edgeResult.edgeScore });
+            edgeBlock = true;
+          }
+        } catch (e) {
+          tradeLogger.logTag('Edge', 'EdgeEstimator error (pass-through)', { message: (e && e.message) || String(e) });
+        }
+      }
+
+      if (!edgeBlock) {
       const raceHorseTier = (state.raceHorseActive && isRaceHorseTimeWindow)
         ? raceHorsePolicy.evaluateRaceHorseConviction(orchResult.signal, orchResult.finalScore, scalpStateEntry, { symbol, snapshot: snapshotForTier })
         : null;
@@ -1716,7 +1763,34 @@ async function runOneTick() {
       if (orderableKrw > 0 && quantityKrw * (1 + UPBIT_FEE_RATE) > orderableKrw) {
         quantityKrw = Math.min(quantityKrw, Math.floor(orderableKrw / (1 + UPBIT_FEE_RATE)));
       }
+      let liquidityBlock = false;
+      let volumeBlock = false;
       if (quantityKrw >= (configDefault.MIN_ORDER_KRW || 5000)) {
+        try {
+          const liqMode = EdgeEstimator.isEnabled() ? EdgeEstimator.getMode() : 'observe_only';
+          const snap = state.lastSnapshots && state.lastSnapshots[market] ? state.lastSnapshots[market] : null;
+          const liq = liquidityFilter.check(snap, quantityKrw, symbol, liqMode);
+          if (!liq.allowed && liqMode === 'hard_gate') {
+            tradeLogger.logTag('거절', liq.reasonCode || 'ORDERBOOK_LIQUIDITY_INSUFFICIENT', { market, top3BidKrw: liq.top3BidKrw, requiredKrw: liq.requiredKrw });
+            liquidityBlock = true;
+          }
+        } catch (e) {
+          tradeLogger.logTag('Liquidity', 'liquidityFilter error (pass-through)', { message: (e && e.message) || String(e) });
+        }
+        if (!liquidityBlock && typeof volumeSurge.check === 'function') {
+          try {
+            const volMode = EdgeEstimator.isEnabled() ? EdgeEstimator.getMode() : 'observe_only';
+            const volResult = volumeSurge.check(state, market, symbol, volMode);
+            if (!volResult.allowed && volMode === 'hard_gate') {
+              tradeLogger.logTag('거절', volResult.reasonCode || 'VOLUME_SURGE_TOO_LOW', { market, value: volResult.value });
+              volumeBlock = true;
+            }
+          } catch (e) {
+            tradeLogger.logTag('VolumeSurge', 'volumeSurge.check error (pass-through)', { message: (e && e.message) || String(e) });
+          }
+        }
+      }
+      if (quantityKrw >= (configDefault.MIN_ORDER_KRW || 5000) && !liquidityBlock && !volumeBlock) {
         const useRiskExecution = USE_SIGNAL_ENGINE && riskEngineFromBootstrap && executionEngineFromBootstrap;
         const decision = state.scalpState[market]?.pipeline?.decision || { side: 'LONG', market };
         if (useRiskExecution) {
