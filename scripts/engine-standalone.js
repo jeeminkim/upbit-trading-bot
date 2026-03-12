@@ -24,7 +24,13 @@ if (process.env.ADMIN_ID || process.env.ADMIN_DISCORD_ID) {
   console.log('[market-bot] ADMIN_ID loaded: No');
 }
 
-const server = require(path.join(root, 'server.js'));
+let server;
+try {
+  server = require(path.join(root, 'server.js'));
+} catch (e) {
+  console.error('[market-bot] server.js load failed:', e?.message || e);
+  process.exit(1);
+}
 const EngineControlService = require(path.join(root, 'dist-refactor', 'packages', 'core', 'src', 'EngineControlService.js')).EngineControlService;
 const runtimeStrategyConfig = require(path.join(root, 'lib', 'runtimeStrategyConfig'));
 
@@ -124,8 +130,9 @@ app.post('/sell-all', async (req, res) => {
 function withServer(fn) {
   return async (req, res) => {
     try {
-      await server.initPromise;
-      const h = server.discordHandlers;
+      const init = server && (server.initPromise || server.init);
+      if (init && typeof init.then === 'function') await init;
+      const h = server && server.discordHandlers;
       if (!h) return res.status(503).json({ error: 'discordHandlers not ready' });
       return await fn(req, res, h);
     } catch (e) {
@@ -217,12 +224,18 @@ app.post('/admin/simple-restart', withServer(async (_req, res, h) => {
   res.json({ ok: true, content });
 }));
 
-server.initPromise.then(() => {
+const initPromise = server && (server.initPromise || server.init);
+if (initPromise && typeof initPromise.then === 'function') {
+  initPromise.then(() => {
+    EngineControlService.startEngine('system');
+    console.log('[market-bot] trading loop started (ENGINE_STARTED)');
+  }).catch((e) => {
+    console.error('[market-bot] server init failed:', e && e.message);
+  });
+} else {
+  console.warn('[market-bot] server.initPromise not available, starting engine without wait');
   EngineControlService.startEngine('system');
-  console.log('[market-bot] trading loop started (ENGINE_STARTED)');
-}).catch((e) => {
-  console.error('[market-bot] server init failed:', e && e.message);
-});
+}
 
 app.listen(ENGINE_PORT, () => {
   console.log('[market-bot] engine API http://localhost:' + ENGINE_PORT);

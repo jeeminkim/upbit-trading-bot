@@ -86,6 +86,19 @@ app.get('/api/engine-status', async (_req: Request, res: Response) => {
   res.status(r.status || 503).json(r.data || { status: 'unavailable', error: 'Engine (market-bot) unavailable' });
 });
 
+/** 서비스 상태 패널용: api-server(항상 up), market-bot, engine 가동 여부. discord-operator는 호출 주체가 Discord일 때만 표시. */
+app.get('/api/services-status', async (_req: Request, res: Response) => {
+  const statusR = await proxyToMarketBot('/status');
+  const engineR = await proxyToMarketBot('/engine-status');
+  const marketBot = statusR.ok === true;
+  const engineRunning = engineR.ok && engineR.data && (engineR.data as { status?: string }).status === 'RUNNING';
+  res.json({
+    apiServer: true,
+    marketBot,
+    engineRunning: !!engineRunning,
+  });
+});
+
 app.post('/api/engine/start', async (req: Request, res: Response) => {
   const userId = (req.body && req.body.userId) || (req.headers?.['x-user-id'] as string) || 'api';
   const updatedBy = (req.body && req.body.updatedBy) || userId;
@@ -698,20 +711,56 @@ EventBus.subscribe('DASHBOARD_EMIT', (payload: { lastEmit: any }) => {
 
 const PORT = Number(process.env.PORT) || 3000;
 
-httpServer.on('error', (err: NodeJS.ErrnoException) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error('[fatal][api-server] Port ' + PORT + ' already in use. Stop the other process (e.g. upbit-bot or another api-server) or set PORT=3001 in .env');
-    process.exit(1);
-  }
-  throw err;
-});
+// ——— 포트 재시도: exit 루프 대신 일정 간격 재시도 (중복 타이머/리스너 방지)
+const MAX_LISTEN_RETRIES = 10;
+const LISTEN_RETRY_MS = 5000;
+let listenRetryCount = 0;
+let listenRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
-httpServer.listen(PORT, () => {
-  console.log(`[api-server] http://localhost:${PORT}`);
+function onListenSuccess(): void {
+  listenRetryCount = 0;
+  console.log('[api-server] http://localhost:' + PORT);
   const adminStatus = getAdminConfigStatus();
   const strategyState = runtimeStrategyConfig.getState();
   console.log('[startup] app=api-server port=' + PORT + ' ADMIN_ID loaded: ' + (adminStatus.adminConfigPresent ? 'Yes' : 'No') + ' runtimeMode=' + (strategyState?.mode || '—') + ' no engine (proxy to market-bot)');
   console.log('[api-server] no engine side effects confirmed');
-});
+
+  // 운영 관찰: 5분마다 메모리 사용량 로그 (leak 의심 시 조사 포인트)
+  const MEMORY_LOG_INTERVAL_MS = 5 * 60 * 1000;
+  setInterval(() => {
+    try {
+      const mu = process.memoryUsage();
+      const rssMb = Math.round(mu.rss / 1024 / 1024);
+      const heapUsedMb = Math.round(mu.heapUsed / 1024 / 1024);
+      const heapTotalMb = Math.round(mu.heapTotal / 1024 / 1024);
+      console.log('[api-server][memory] rss=' + rssMb + 'MB heapUsed=' + heapUsedMb + 'MB heapTotal=' + heapTotalMb + 'MB');
+    } catch (_) {}
+  }, MEMORY_LOG_INTERVAL_MS);
+}
+
+function tryListen(): void {
+  if (listenRetryTimer !== null) return;
+
+  httpServer.once('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+      listenRetryCount++;
+      console.error('[api-server] Port ' + PORT + ' in use (retry ' + listenRetryCount + '/' + MAX_LISTEN_RETRIES + ', next in ' + LISTEN_RETRY_MS + 'ms)');
+      if (listenRetryCount >= MAX_LISTEN_RETRIES) {
+        console.error('[api-server] Max listen retries reached, exiting. Stop other process on port ' + PORT + ' or set PORT=3001 in .env');
+        process.exit(1);
+      }
+      listenRetryTimer = setTimeout(() => {
+        listenRetryTimer = null;
+        tryListen();
+      }, LISTEN_RETRY_MS);
+      return;
+    }
+    throw err;
+  });
+
+  httpServer.listen(PORT, onListenSuccess);
+}
+
+tryListen();
 
 export { app, io, httpServer };

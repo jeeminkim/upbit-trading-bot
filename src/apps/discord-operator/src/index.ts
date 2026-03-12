@@ -68,16 +68,19 @@ try {
   packageVersion = process.env.npm_package_version;
 }
 const scriptPath = process.argv[1] ?? 'unknown';
-LogUtil.logWarn(LOG_TAG, '[BOOT][BUILD_INFO]', {
-  pid: process.pid,
-  cwd: process.cwd(),
-  scriptPath,
-  argv: process.argv,
-  nodeVersion: process.version,
-  PANEL_LAYOUT_VERSION,
-  PANEL_CONTENT_VERSION,
-  renderModeDefault: 'single',
-  packageVersion: packageVersion ?? 'unknown',
+// BUILD_INFO를 setImmediate로 지연해 panelContract 순환 참조 시 'before initialization' 방지
+setImmediate(() => {
+  LogUtil.logWarn(LOG_TAG, '[BOOT][BUILD_INFO]', {
+    pid: process.pid,
+    cwd: process.cwd(),
+    scriptPath,
+    argv: process.argv,
+    nodeVersion: process.version,
+    PANEL_LAYOUT_VERSION,
+    PANEL_CONTENT_VERSION,
+    renderModeDefault: 'single',
+    packageVersion: packageVersion ?? 'unknown',
+  });
 });
 
 process.on('uncaughtException', (err) => {
@@ -135,12 +138,16 @@ async function api<T>(path: string, opts?: { method?: string; body?: any; userId
   return res.json() as Promise<T>;
 }
 
-function buildStatusEmbedFromApi(data: {
-  assets: any;
-  profitSummary: { profitPct: number; totalEval: number; totalBuy: number; krw?: number; orderableKrw?: number };
-  strategySummary?: any;
-  botEnabled?: boolean;
-}): MessageEmbed {
+/** services: /api/services-status 응답. 있으면 임베드 상단에 서비스 상태 한 줄 추가. */
+function buildStatusEmbedFromApi(
+  data: {
+    assets: any;
+    profitSummary: { profitPct: number; totalEval: number; totalBuy: number; krw?: number; orderableKrw?: number };
+    strategySummary?: any;
+    botEnabled?: boolean;
+  },
+  services?: { apiServer?: boolean; marketBot?: boolean; engineRunning?: boolean } | null
+): MessageEmbed {
   const assets = data.assets;
   const summary = data.profitSummary;
   const totalEval = summary?.totalEval ?? assets?.totalEvaluationKrw ?? 0;
@@ -160,16 +167,27 @@ function buildStatusEmbedFromApi(data: {
     `| Depth | ${w.weight_depth ?? '—'} |`,
     `| Kimp | ${w.weight_kimp ?? '—'} |`,
   ].join('\n');
+
+  const fields: { name: string; value: string; inline?: boolean }[] = [];
+  if (services != null) {
+    const a = services.apiServer ? '🟢' : '🔴';
+    const d = '🟢'; // Discord에서 호출 시 discord-operator는 가동 중
+    const m = services.marketBot ? '🟢' : '🔴';
+    const e = services.engineRunning ? '🟢' : '🔴';
+    fields.push({ name: '서비스 상태', value: `api-server ${a} · discord-op ${d} · market-bot ${m} · engine ${e}`, inline: false });
+  }
+  fields.push(
+    { name: '총 평가금액(현재 총자산)', value: Number(totalEval).toLocaleString('ko-KR') + ' 원', inline: true },
+    { name: 'KRW 잔고', value: Number(orderableKrw).toLocaleString('ko-KR') + ' 원', inline: true },
+    { name: '총 손익률', value: profitPct, inline: true },
+    { name: '가동 전략', value: strategyName, inline: false },
+    { name: 'RaceHorse(예약) 가중치', value: '```\n' + weightTable + '\n```', inline: false }
+  );
+
   return new MessageEmbed()
     .setTitle('📊 현재 상태')
     .setColor(0x5865f2)
-    .addFields(
-      { name: '총 평가금액(현재 총자산)', value: Number(totalEval).toLocaleString('ko-KR') + ' 원', inline: true },
-      { name: 'KRW 잔고', value: Number(orderableKrw).toLocaleString('ko-KR') + ' 원', inline: true },
-      { name: '총 손익률', value: profitPct, inline: true },
-      { name: '가동 전략', value: strategyName, inline: false },
-      { name: 'RaceHorse(예약) 가중치', value: '```\n' + weightTable + '\n```', inline: false }
-    )
+    .addFields(fields)
     .setFooter({ text: 'ProfitCalculationService.getSummary() 단일 소스' })
     .setTimestamp();
 }
@@ -964,8 +982,11 @@ async function handleButton(interaction: any): Promise<void> {
     await interaction.deferReply({ ephemeral: true }).catch(() => {});
     try {
       if (key === 'current_status') {
-        const data = await api<any>('/api/status');
-        const embed = buildStatusEmbedFromApi(data);
+        const [data, services] = await Promise.all([
+          api<any>('/api/status'),
+          api<{ apiServer?: boolean; marketBot?: boolean; engineRunning?: boolean }>('/api/services-status').catch(() => null),
+        ]);
+        const embed = buildStatusEmbedFromApi(data, services ?? undefined);
         await interaction.editReply({ embeds: [embed] }).catch(() => {});
       } else if (key === 'current_pnl') {
         const data = await api<any>('/api/pnl');
@@ -1079,8 +1100,11 @@ async function handleSlash(interaction: any): Promise<void> {
       }).catch(() => {});
       await AuditLogService.log({ userId, command: 'sell_all', timestamp: new Date().toISOString(), success: true });
     } else if (name === 'status') {
-      const data = await api<any>('/api/status');
-      const embed = buildStatusEmbedFromApi(data);
+      const [data, services] = await Promise.all([
+        api<any>('/api/status'),
+        api<{ apiServer?: boolean; marketBot?: boolean; engineRunning?: boolean }>('/api/services-status').catch(() => null),
+      ]);
+      const embed = buildStatusEmbedFromApi(data, services ?? undefined);
       await interaction.editReply({ embeds: [embed] }).catch(() => {});
       await AuditLogService.log({ userId, command: 'status', timestamp: new Date().toISOString(), success: true });
     } else if (name === 'pnl') {
@@ -1229,14 +1253,26 @@ client.once('ready', async () => {
 client.removeAllListeners('interactionCreate');
 client.on('interactionCreate', async (interaction: any) => {
   try {
-    if (interaction.isButton()) {
-      await handleButton(interaction);
-    }
-    if (interaction.isChatInputCommand()) {
+    if (
+      typeof interaction.isChatInputCommand === 'function' &&
+      interaction.isChatInputCommand()
+    ) {
       await handleSlash(interaction);
+      return;
     }
-  } catch (e) {
-    LogUtil.logError(LOG_TAG, 'interaction handle error', { message: (e as Error).message });
+    if (
+      typeof interaction.isButton === 'function' &&
+      interaction.isButton()
+    ) {
+      await handleButton(interaction);
+      return;
+    }
+    // 확장: select menu / modal 등은 여기서 분기 추가
+  } catch (err) {
+    LogUtil.logError(LOG_TAG, 'interaction error', {
+      message: (err as Error).message,
+      stack: (err as Error).stack?.slice(0, 200),
+    });
   }
 });
 

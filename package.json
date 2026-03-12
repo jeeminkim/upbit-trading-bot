@@ -109,6 +109,7 @@
     "pm2:refactor": "npm run build:refactor && pm2 start ecosystem.refactor.config.cjs",
     "pm2:refactor:restart": "npm run build:refactor && pm2 restart ecosystem.refactor.config.cjs",
     "pm2:refactor:stop": "node scripts/pm2-delete-if-exists.js delete api-server discord-operator market-bot",
+    "pm2:refactor:safe-restart": "node scripts/safe-restart-refactor.js",
     "pm2:refactor:logs": "pm2 logs api-server discord-operator market-bot",
     "start:agent": "node discord_agent.js",
     "start:all": "pm2 start ecosystem.config.cjs",

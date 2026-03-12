@@ -3621,6 +3621,7 @@ if (require.main !== module) {
     discordHandlers: _exportDiscordHandlers
   };
 }
+}
 
 /**
  * 단일 진입점: node server.js 한 번만 실행하면

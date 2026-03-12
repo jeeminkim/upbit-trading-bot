@@ -52,16 +52,18 @@ catch {
     packageVersion = process.env.npm_package_version;
 }
 const scriptPath = process.argv[1] ?? 'unknown';
-LogUtil_1.LogUtil.logWarn(LOG_TAG, '[BOOT][BUILD_INFO]', {
-    pid: process.pid,
-    cwd: process.cwd(),
-    scriptPath,
-    argv: process.argv,
-    nodeVersion: process.version,
-    PANEL_LAYOUT_VERSION: panelContract_1.PANEL_LAYOUT_VERSION,
-    PANEL_CONTENT_VERSION: panelContract_1.PANEL_CONTENT_VERSION,
-    renderModeDefault: 'single',
-    packageVersion: packageVersion ?? 'unknown',
+setImmediate(() => {
+    LogUtil_1.LogUtil.logWarn(LOG_TAG, '[BOOT][BUILD_INFO]', {
+        pid: process.pid,
+        cwd: process.cwd(),
+        scriptPath,
+        argv: process.argv,
+        nodeVersion: process.version,
+        PANEL_LAYOUT_VERSION: panelContract_1.PANEL_LAYOUT_VERSION,
+        PANEL_CONTENT_VERSION: panelContract_1.PANEL_CONTENT_VERSION,
+        renderModeDefault: 'single',
+        packageVersion: packageVersion ?? 'unknown',
+    });
 });
 process.on('uncaughtException', (err) => {
     LogUtil_1.LogUtil.logError(LOG_TAG, 'uncaughtException', { message: err.message, stack: err.stack });
@@ -1184,15 +1186,20 @@ client.once('ready', async () => {
 client.removeAllListeners('interactionCreate');
 client.on('interactionCreate', async (interaction) => {
     try {
-        if (interaction.isButton()) {
-            await handleButton(interaction);
-        }
-        if (interaction.isChatInputCommand()) {
+        if (typeof interaction.isChatInputCommand === 'function' && interaction.isChatInputCommand()) {
             await handleSlash(interaction);
+            return;
+        }
+        if (typeof interaction.isButton === 'function' && interaction.isButton()) {
+            await handleButton(interaction);
+            return;
         }
     }
-    catch (e) {
-        LogUtil_1.LogUtil.logError(LOG_TAG, 'interaction handle error', { message: e.message });
+    catch (err) {
+        LogUtil_1.LogUtil.logError(LOG_TAG, 'interaction error', {
+            message: err?.message,
+            stack: err?.stack?.slice(0, 200),
+        });
     }
 });
 async function startDiscordOperator() {
