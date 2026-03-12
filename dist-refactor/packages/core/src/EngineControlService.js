@@ -15,6 +15,13 @@ let state = {
     updatedBy: 'system',
     lastReason: 'initial',
 };
+function logEngineState(tag, payload) {
+    try {
+        console.log('[ENGINE_STATE]', tag, payload);
+    }
+    catch (_) { }
+}
+logEngineState('initial state', { status: state.status });
 exports.EngineControlService = {
     getState() {
         return { ...state };
@@ -24,8 +31,10 @@ exports.EngineControlService = {
      */
     startEngine(updatedBy) {
         if (state.status === 'RUNNING' || state.status === 'STARTING') {
+            logEngineState('start skipped (already running)', { status: state.status });
             return { started: false, noop: true, message: '이미 실행 중입니다.' };
         }
+        logEngineState('start requested', { updatedBy });
         state.status = 'STARTING';
         state.updatedBy = updatedBy;
         state.lastReason = 'manual_start';
@@ -40,15 +49,18 @@ exports.EngineControlService = {
             at: state.startedAt,
             runtimeMode: null,
         });
-        return { started: true, message: '매매 엔진을 시작합니다.' };
+        logEngineState('start success', { startedAt: state.startedAt });
+        return { started: true, message: '자동매매 엔진이 시작되었습니다.' };
     },
     /**
      * @returns { stopped: boolean, noop?: boolean, message?: string }
      */
     stopEngine(updatedBy) {
         if (state.status === 'STOPPED' || state.status === 'STOPPING') {
-            return { stopped: false, noop: true, message: '이미 정지 상태입니다.' };
+            logEngineState('stop skipped (already stopped)', { status: state.status });
+            return { stopped: false, noop: true, message: '이미 중지 상태입니다.' };
         }
+        logEngineState('stop requested', { updatedBy });
         state.status = 'STOPPING';
         state.updatedBy = updatedBy;
         state.lastReason = 'manual_stop';
@@ -61,6 +73,7 @@ exports.EngineControlService = {
             updatedBy,
             at: state.stoppedAt,
         });
-        return { stopped: true, message: '매매 엔진을 정지했습니다.' };
+        logEngineState('stop success', { stoppedAt: state.stoppedAt });
+        return { stopped: true, message: '자동매매 엔진을 중지했습니다.' };
     },
 };

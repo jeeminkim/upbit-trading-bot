@@ -33,6 +33,8 @@ const fs = require('fs');
 const serverLock = require('./lib/serverLock');
 const SERVER_LOCK_PATH = path.join(__dirname, '.server.lock');
 let _exportDiscordHandlers = null; // require 시 engine-standalone 등에서 사용
+/** graceful shutdown 시 lock 해제용 (require.main === module 일 때만 설정) */
+let _releaseLockRef = null;
 // lock은 engine을 실행하는 프로세스(market-bot / engine-standalone)에서만 사용. api-server가 server.js를 require할 때는 lock 하지 않음.
 if (require.main === module) {
   (function ensureSingleInstance() {
@@ -48,9 +50,9 @@ if (require.main === module) {
     function releaseLock() {
       serverLock.release(SERVER_LOCK_PATH);
     }
+    _releaseLockRef = releaseLock;
     process.on('exit', releaseLock);
-    process.on('SIGINT', () => { releaseLock(); process.exit(0); });
-    process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
+    // SIGINT/SIGTERM은 아래에서 graceful shutdown 훅으로 등록
   })();
 }
 const http = require('http');
@@ -587,7 +589,11 @@ EngineStateStore.init({
     requiredKrw: GLOBAL_MIN_BUYABLE_KRW,
     since: null,
     notifiedAt: null
-  }
+  },
+  lastEngineStartedAt: null,
+  lastEngineStoppedAt: null,
+  lastShutdownReason: null,
+  shutdownInProgress: false
 });
 if (executionEngineFromBootstrap) executionEngineFromBootstrap.stateStore = EngineStateStore;
 if (positionEngineFromBootstrap) positionEngineFromBootstrap.stateStore = EngineStateStore;
@@ -779,9 +785,16 @@ function buildCurrentStateEmbed(assets, summary, opts) {
     `• **수익률**: ${profitPct}`,
     `• **주문가능**: ${orderableKrw.toLocaleString('ko-KR')} 원`
   ].join('\n');
+  const engineStatusLine = isEngineRunning ? '자동매매 엔진 상태: 🟢 가동 중' : '자동매매 엔진 상태: 🔴 중지됨';
+  const lastStarted = opts?.lastEngineStartedAt ? new Date(opts.lastEngineStartedAt).toLocaleString('ko-KR') : '—';
+  const lastStopped = opts?.lastEngineStoppedAt ? new Date(opts.lastEngineStoppedAt).toLocaleString('ko-KR') : '—';
+  const shutdownReason = opts?.lastShutdownReason || '—';
   const fields = [
-    { name: '매매 엔진 상태', value: isEngineRunning ? '🟢 구동 중' : '🔴 정지됨', inline: true },
+    { name: '자동매매 엔진 상태', value: isEngineRunning ? '🟢 가동 중' : '🔴 중지됨', inline: true },
     { name: '경주마 모드', value: raceHorseLabel, inline: true },
+    { name: '마지막 엔진 시작', value: lastStarted, inline: true },
+    { name: '마지막 엔진 중지', value: lastStopped, inline: true },
+    { name: '최근 종료 사유', value: shutdownReason, inline: false },
     { name: '투자 내역', value: investmentSummary, inline: false },
     { name: '총 손익률', value: profitPct, inline: true },
     { name: '가동 전략', value: strategyName, inline: false },
@@ -819,12 +832,14 @@ function buildCurrentStateEmbed(assets, summary, opts) {
       }
     );
   }
-  return new MessageEmbed()
+  const embed = new MessageEmbed()
     .setTitle('📊 현재 상태')
     .setColor(0x5865f2)
+    .setDescription(engineStatusLine)
     .addFields(...fields)
     .setFooter({ text: 'APENFT·PURSE·잡코인 제외 · 수익률 = (평가손익/총매수)×100, 총매수 0이면 0%' })
     .setTimestamp();
+  return embed;
 }
 
 async function fetchFng() {
@@ -1511,6 +1526,9 @@ async function emitDashboard() {
       aggressiveSymbols,
       relaxedModeLabel: getRelaxedModeLabel(),
       aiUsage: gemini.getDailyUsage ? gemini.getDailyUsage() : null,
+      lastEngineStartedAt: state.lastEngineStartedAt,
+      lastEngineStoppedAt: state.lastEngineStoppedAt,
+      lastShutdownReason: state.lastShutdownReason,
       ...getModeRemainingOpts()
     });
     discordBot.updateStatusMessage(statusEmbed, aggressiveSymbols).catch(() => {});
@@ -1564,6 +1582,50 @@ const tradingEngine = new TradingEngine(EngineStateStore, {
 });
 
 const RECOVERY_FETCH_INTERVAL_MS = 10 * 1000;
+
+/** Graceful shutdown: 엔진 중지 → Discord 종료 메시지 전송(최대 4초) → lock 해제 → exit. 중복 실행 방지. */
+async function runGracefulShutdown(reason) {
+  if (state.shutdownInProgress) return;
+  state.shutdownInProgress = true;
+  state.lastShutdownReason = reason;
+  EngineStateStore.update({ shutdownInProgress: true, lastShutdownReason: reason });
+  console.log('[SHUTDOWN] signal received:', reason);
+  console.log('[SHUTDOWN] shutdown start');
+  const engineWasRunning = !!state.botEnabled;
+  if (state.botEnabled) {
+    tradingEngine.stop();
+    state.botEnabled = false;
+    state.lastEngineStoppedAt = new Date().toISOString();
+    EngineStateStore.update({ botEnabled: false, serviceStopped: true, lastEngineStoppedAt: state.lastEngineStoppedAt });
+    console.log('[SHUTDOWN] engine stop result: stopped');
+  } else {
+    console.log('[SHUTDOWN] engine stop result: already stopped');
+  }
+  const discordStatus = discordBot.isOnline && discordBot.isOnline() ? '종료 준비 완료' : '미연결';
+  const lines = [
+    '🛑 **시스템 종료되었습니다**',
+    '',
+    '- Discord Operator: ' + discordStatus,
+    '- 자동매매 엔진: ' + (engineWasRunning ? '중지 처리 완료' : '이미 중지됨'),
+    '- 종료 사유: ' + reason
+  ];
+  console.log('[SHUTDOWN] shutdown message send start');
+  try {
+    const sent = discordBot.sendShutdownMessage ? await discordBot.sendShutdownMessage(lines.join('\n')) : false;
+    console.log('[SHUTDOWN] shutdown message send ' + (sent ? 'success' : 'fail'));
+  } catch (e) {
+    console.warn('[SHUTDOWN] shutdown message send error:', e?.message);
+  }
+  if (_releaseLockRef) _releaseLockRef();
+  console.log('[SHUTDOWN] shutdown complete');
+  process.exit(0);
+}
+
+if (require.main === module) {
+  console.log('[ENGINE_STATE] initial state:', { botEnabled: state.botEnabled });
+  process.on('SIGINT', () => { runGracefulShutdown('SIGINT').catch(() => process.exit(1)); });
+  process.on('SIGTERM', () => { runGracefulShutdown('SIGTERM').catch(() => process.exit(1)); });
+}
 
 async function runOneTick() {
   const mode = ApiAccessPolicy.refreshEngineMode(EngineStateStore);
@@ -2363,11 +2425,13 @@ const initPromise = (async () => {
       }
       const hasData = assets && (assets.totalEvaluationKrw != null || assets.orderableKrw != null);
       if (!hasData) {
+        const engineLine = state.botEnabled ? '자동매매 엔진 상태: 🟢 가동 중' : '자동매매 엔진 상태: 🔴 중지됨';
         return new MessageEmbed()
           .setTitle('📊 현재 상태')
           .setColor(0x5865f2)
+          .setDescription(engineLine)
           .addFields(
-            { name: '매매 엔진 상태', value: state.botEnabled ? '🟢 구동 중' : '🔴 정지됨', inline: true },
+            { name: '자동매매 엔진 상태', value: state.botEnabled ? '🟢 가동 중' : '🔴 중지됨', inline: true },
             { name: '경주마 모드', value: getRaceHorseStatusLabel(state.raceHorseActive), inline: true },
             { name: '상태', value: '데이터 로딩 중… (Upbit API 확인 후 [📊 현재 상태] 버튼으로 새로고침)', inline: false }
           )
@@ -2381,10 +2445,21 @@ const initPromise = (async () => {
         aggressiveSymbols: scalpEngine.getAggressiveSymbols(),
         relaxedModeLabel: getRelaxedModeLabel(),
         aiUsage: gemini.getDailyUsage ? gemini.getDailyUsage() : null,
+        lastEngineStartedAt: state.lastEngineStartedAt,
+        lastEngineStoppedAt: state.lastEngineStoppedAt,
+        lastShutdownReason: state.lastShutdownReason,
         ...getModeRemainingOpts()
       });
     },
     engineStart: async () => {
+      if (state.shutdownInProgress) {
+        return { success: false, message: '종료 처리 중이라 엔진을 시작할 수 없습니다.' };
+      }
+      if (state.botEnabled) {
+        console.log('[ENGINE_STATE] start skipped (already running)');
+        return { success: false, noop: true, message: '이미 실행 중입니다.' };
+      }
+      console.log('[ENGINE_STATE] start requested');
       if (!apiKeys.accessKey || !apiKeys.secretKey) {
         return { success: false, message: 'API 키가 설정되지 않았습니다.' };
       }
@@ -2399,16 +2474,21 @@ const initPromise = (async () => {
           await client.request('GET', '/orders', { market: 'KRW-BTC', state: 'done', limit: '1' });
         });
         state.botEnabled = true;
+        state.lastEngineStartedAt = new Date().toISOString();
+        state.lastEngineStoppedAt = null;
+        EngineStateStore.update({ botEnabled: true, lastEngineStartedAt: state.lastEngineStartedAt, lastEngineStoppedAt: null });
         state.assets = await fetchAssets();
         if (state.assets && state.assets.totalEvaluationKrw != null) {
           state.initialAssetsForReturn = state.assets.totalEvaluationKrw;
         }
         emitDashboard().catch(() => {});
-        return { success: true, message: '자동 매매를 시작합니다.' };
+        console.log('[ENGINE_STATE] start success');
+        return { success: true, message: '자동매매 엔진이 시작되었습니다.' };
       } catch (e) {
         const msg = e?.message || '';
         const is401 = /401|invalid_query|unauthorized/i.test(msg);
         state.botEnabled = false;
+        EngineStateStore.update({ botEnabled: false });
         return {
           success: false,
           message: is401
@@ -2418,7 +2498,15 @@ const initPromise = (async () => {
       }
     },
     engineStop: async () => {
+      if (!state.botEnabled) {
+        console.log('[ENGINE_STATE] stop skipped (already stopped)');
+        return { success: true, noop: true, message: '이미 중지 상태입니다.' };
+      }
+      console.log('[ENGINE_STATE] stop requested');
       tradingEngine.stop();
+      state.botEnabled = false;
+      state.lastEngineStoppedAt = new Date().toISOString();
+      EngineStateStore.update({ botEnabled: false, serviceStopped: true, lastEngineStoppedAt: state.lastEngineStoppedAt });
       if (apiKeys.accessKey && apiKeys.secretKey) {
         try {
           await withUpbitFailover(async () => {
@@ -2430,6 +2518,8 @@ const initPromise = (async () => {
         }
       }
       emitDashboard().catch(() => {});
+      console.log('[ENGINE_STATE] stop success');
+      return { success: true, message: '자동매매 엔진을 중지했습니다.' };
     },
     /** 경주마 모드 토글 — 변동성 큰 종목 스캐닝 주기 단축 */
     toggleRaceHorse: async () => {
@@ -2522,6 +2612,9 @@ const initPromise = (async () => {
         aggressiveSymbols: scalpEngine.getAggressiveSymbols(),
         relaxedModeLabel: getRelaxedModeLabel(),
         aiUsage: gemini.getDailyUsage ? gemini.getDailyUsage() : null,
+        lastEngineStartedAt: state.lastEngineStartedAt,
+        lastEngineStoppedAt: state.lastEngineStoppedAt,
+        lastShutdownReason: state.lastShutdownReason,
         ...getModeRemainingOpts()
       });
       const profitPctNum = positionEngineFromBootstrap ? positionEngineFromBootstrap.getProfitPct(assets) : getProfitPct(assets);
