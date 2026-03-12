@@ -138,7 +138,7 @@ async function api<T>(path: string, opts?: { method?: string; body?: any; userId
   return res.json() as Promise<T>;
 }
 
-/** services: /api/services-status 응답. 있으면 임베드 상단에 서비스 상태 한 줄 추가. */
+/** services: /api/services-status 응답. 있으면 임베드 상단에 서비스 상태 한 줄 추가. details.reason 있으면 🔴인 항목에만 괄호로 표시. */
 function buildStatusEmbedFromApi(
   data: {
     assets: any;
@@ -146,7 +146,16 @@ function buildStatusEmbedFromApi(
     strategySummary?: any;
     botEnabled?: boolean;
   },
-  services?: { apiServer?: boolean; marketBot?: boolean; engineRunning?: boolean } | null
+  services?: {
+    apiServer?: boolean;
+    marketBot?: boolean;
+    engineRunning?: boolean;
+    details?: {
+      apiServer?: { reason?: string | null };
+      marketBot?: { reason?: string | null };
+      engine?: { reason?: string | null };
+    };
+  } | null
 ): MessageEmbed {
   const assets = data.assets;
   const summary = data.profitSummary;
@@ -168,12 +177,16 @@ function buildStatusEmbedFromApi(
     `| Kimp | ${w.weight_kimp ?? '—'} |`,
   ].join('\n');
 
+  const details = services?.details;
+  const fmt = (ok: boolean, reason: string | null | undefined) =>
+    ok ? '🟢' : '🔴' + (reason ? ' (' + reason + ')' : '');
+
   const fields: { name: string; value: string; inline?: boolean }[] = [];
   if (services != null) {
-    const a = services.apiServer ? '🟢' : '🔴';
+    const a = fmt(!!services.apiServer, details?.apiServer?.reason ?? null);
     const d = '🟢'; // Discord에서 호출 시 discord-operator는 가동 중
-    const m = services.marketBot ? '🟢' : '🔴';
-    const e = services.engineRunning ? '🟢' : '🔴';
+    const m = fmt(!!services.marketBot, details?.marketBot?.reason ?? null);
+    const e = fmt(!!services.engineRunning, details?.engine?.reason ?? null);
     fields.push({ name: '서비스 상태', value: `api-server ${a} · discord-op ${d} · market-bot ${m} · engine ${e}`, inline: false });
   }
   fields.push(
@@ -984,7 +997,7 @@ async function handleButton(interaction: any): Promise<void> {
       if (key === 'current_status') {
         const [data, services] = await Promise.all([
           api<any>('/api/status'),
-          api<{ apiServer?: boolean; marketBot?: boolean; engineRunning?: boolean }>('/api/services-status').catch(() => null),
+          api<{ apiServer?: boolean; marketBot?: boolean; engineRunning?: boolean; details?: { apiServer?: { reason?: string | null }; marketBot?: { reason?: string | null }; engine?: { reason?: string | null } } }>('/api/services-status').catch(() => null),
         ]);
         const embed = buildStatusEmbedFromApi(data, services ?? undefined);
         await interaction.editReply({ embeds: [embed] }).catch(() => {});
@@ -1102,7 +1115,7 @@ async function handleSlash(interaction: any): Promise<void> {
     } else if (name === 'status') {
       const [data, services] = await Promise.all([
         api<any>('/api/status'),
-        api<{ apiServer?: boolean; marketBot?: boolean; engineRunning?: boolean }>('/api/services-status').catch(() => null),
+        api<{ apiServer?: boolean; marketBot?: boolean; engineRunning?: boolean; details?: { apiServer?: { reason?: string | null }; marketBot?: { reason?: string | null }; engine?: { reason?: string | null } } }>('/api/services-status').catch(() => null),
       ]);
       const embed = buildStatusEmbedFromApi(data, services ?? undefined);
       await interaction.editReply({ embeds: [embed] }).catch(() => {});

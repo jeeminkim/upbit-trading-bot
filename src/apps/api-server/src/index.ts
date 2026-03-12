@@ -26,16 +26,32 @@ const io = new Server(httpServer);
 
 const MARKET_BOT_URL = (process.env.MARKET_BOT_URL || 'http://localhost:3001').replace(/\/$/, '');
 
-async function proxyToMarketBot(path: string, opts?: { method?: string; body?: any }): Promise<{ ok: boolean; data?: any; status?: number }> {
+/** timeoutMs: 지정 시 해당 시간 내 응답 없으면 503 반환. /api/services-status 등에서 API 전체 block 방지용. */
+async function proxyToMarketBot(
+  path: string,
+  opts?: { method?: string; body?: any; timeoutMs?: number }
+): Promise<{ ok: boolean; data?: any; status?: number }> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const signal =
+    opts?.timeoutMs != null && opts.timeoutMs > 0
+      ? (() => {
+          const controller = new AbortController();
+          timeoutId = setTimeout(() => controller.abort(), opts.timeoutMs);
+          return controller.signal;
+        })()
+      : undefined;
   try {
     const res = await fetch(MARKET_BOT_URL + path, {
       method: opts?.method || 'GET',
       headers: opts?.body ? { 'Content-Type': 'application/json' } : undefined,
       body: opts?.body ? JSON.stringify(opts.body) : undefined,
+      signal,
     });
+    if (timeoutId) clearTimeout(timeoutId);
     const data = await res.json().catch(() => ({}));
     return { ok: res.ok, data, status: res.status };
   } catch (e) {
+    if (timeoutId) clearTimeout(timeoutId);
     return { ok: false, data: { error: (e as Error).message }, status: 503 };
   }
 }
@@ -86,16 +102,45 @@ app.get('/api/engine-status', async (_req: Request, res: Response) => {
   res.status(r.status || 503).json(r.data || { status: 'unavailable', error: 'Engine (market-bot) unavailable' });
 });
 
-/** 서비스 상태 패널용: api-server(항상 up), market-bot, engine 가동 여부. discord-operator는 호출 주체가 Discord일 때만 표시. */
+/** proxy 실패 시 운영자가 "왜 false인지" 알 수 있도록 reason 문자열로 정규화 */
+function deriveReason(r: { ok: boolean; data?: { error?: string }; status?: number }): string | null {
+  if (r.ok) return null;
+  const msg = (r.data?.error ?? '').toLowerCase();
+  if (msg.includes('abort') || msg.includes('timeout')) return 'timeout';
+  if (msg.includes('econnrefused') || msg.includes('connection refused')) return 'connection refused';
+  if (msg.includes('enotfound') || msg.includes('getaddrinfo')) return 'unreachable';
+  return r.data?.error ?? 'unavailable';
+}
+
+/** 서비스 상태 패널용. market-bot 무응답 시에도 짧은 시간 내 응답하도록 timeout 적용(전체 API block 방지). */
+const SERVICES_STATUS_TIMEOUT_MS = 5000;
+// 설계 포인트: Promise.allSettled 전환 시 한 쪽 실패해도 다른 쪽 결과+reason을 그대로 반환 가능. 현재 all로도 reason은 deriveReason으로 보완됨.
+// 설계 포인트: 반복 호출 부담 완화 시 1~2초 TTL 캐시(lastFetchedAt/cachedStatus) 검토 가능. 이번 턴은 미구현.
+// 설계 포인트: timeout/연결 실패 횟수 집계 시 in-memory counter(예: servicesStatusTimeoutCount) 추가 가능. 메트릭 대확장 없이 운영 가시성만 강화.
+
 app.get('/api/services-status', async (_req: Request, res: Response) => {
-  const statusR = await proxyToMarketBot('/status');
-  const engineR = await proxyToMarketBot('/engine-status');
+  const [statusR, engineR] = await Promise.all([
+    proxyToMarketBot('/status', { timeoutMs: SERVICES_STATUS_TIMEOUT_MS }),
+    proxyToMarketBot('/engine-status', { timeoutMs: SERVICES_STATUS_TIMEOUT_MS }),
+  ]);
   const marketBot = statusR.ok === true;
-  const engineRunning = engineR.ok && engineR.data && (engineR.data as { status?: string }).status === 'RUNNING';
+  const engineStatus = engineR.ok && engineR.data ? (engineR.data as { status?: string }).status : undefined;
+  const engineRunning = engineStatus === 'RUNNING';
+
+  const marketBotReason = deriveReason(statusR);
+  const engineReason: string | null = engineR.ok
+    ? (engineRunning ? null : 'stopped')
+    : deriveReason(engineR);
+
   res.json({
     apiServer: true,
     marketBot,
     engineRunning: !!engineRunning,
+    details: {
+      apiServer: { reason: null as string | null },
+      marketBot: { reason: marketBotReason },
+      engine: { reason: engineReason },
+    },
   });
 });
 
@@ -712,6 +757,7 @@ EventBus.subscribe('DASHBOARD_EMIT', (payload: { lastEmit: any }) => {
 const PORT = Number(process.env.PORT) || 3000;
 
 // ——— 포트 재시도: exit 루프 대신 일정 간격 재시도 (중복 타이머/리스너 방지)
+// 리스너: 매 시도마다 httpServer.once('error', ...) 1회만 등록. EADDRINUSE 시 핸들러 실행 후 제거(once) → 재시도 시 새 1회 등록. 성공 시 미발화로 1개 유지(누적 없음).
 const MAX_LISTEN_RETRIES = 10;
 const LISTEN_RETRY_MS = 5000;
 let listenRetryCount = 0;
@@ -725,15 +771,42 @@ function onListenSuccess(): void {
   console.log('[startup] app=api-server port=' + PORT + ' ADMIN_ID loaded: ' + (adminStatus.adminConfigPresent ? 'Yes' : 'No') + ' runtimeMode=' + (strategyState?.mode || '—') + ' no engine (proxy to market-bot)');
   console.log('[api-server] no engine side effects confirmed');
 
-  // 운영 관찰: 5분마다 메모리 사용량 로그 (leak 의심 시 조사 포인트)
+  // 운영 관찰: 5분마다 메모리 사용량 로그 (leak 추적: 절대값 + 직전 대비 delta)
   const MEMORY_LOG_INTERVAL_MS = 5 * 60 * 1000;
+  let lastMemorySnapshot: { rss: number; heapUsed: number; heapTotal: number; external: number } | null = null;
   setInterval(() => {
     try {
       const mu = process.memoryUsage();
       const rssMb = Math.round(mu.rss / 1024 / 1024);
       const heapUsedMb = Math.round(mu.heapUsed / 1024 / 1024);
       const heapTotalMb = Math.round(mu.heapTotal / 1024 / 1024);
-      console.log('[api-server][memory] rss=' + rssMb + 'MB heapUsed=' + heapUsedMb + 'MB heapTotal=' + heapTotalMb + 'MB');
+      const external = (mu as NodeJS.MemoryUsage).external ?? 0;
+      const externalMb = Math.round(external / 1024 / 1024);
+
+      let rssDelta = '';
+      let heapUsedDelta = '';
+      let heapTotalDelta = '';
+      let externalDelta = '';
+      if (lastMemorySnapshot !== null) {
+        const dr = Math.round((mu.rss - lastMemorySnapshot.rss) / 1024 / 1024);
+        const dh = Math.round((mu.heapUsed - lastMemorySnapshot.heapUsed) / 1024 / 1024);
+        const dt = Math.round((mu.heapTotal - lastMemorySnapshot.heapTotal) / 1024 / 1024);
+        const de = Math.round((external - lastMemorySnapshot.external) / 1024 / 1024);
+        rssDelta = dr >= 0 ? ' +' + dr + 'MB' : ' ' + dr + 'MB';
+        heapUsedDelta = dh >= 0 ? ' +' + dh + 'MB' : ' ' + dh + 'MB';
+        heapTotalDelta = dt >= 0 ? ' +' + dt + 'MB' : ' ' + dt + 'MB';
+        externalDelta = de >= 0 ? ' +' + de + 'MB' : ' ' + de + 'MB';
+      } else {
+        rssDelta = heapUsedDelta = heapTotalDelta = externalDelta = ' (first)';
+      }
+      lastMemorySnapshot = { rss: mu.rss, heapUsed: mu.heapUsed, heapTotal: mu.heapTotal, external };
+
+      console.log(
+        '[api-server][memory] rss=' + rssMb + 'MB' + rssDelta +
+        ' heapUsed=' + heapUsedMb + 'MB' + heapUsedDelta +
+        ' heapTotal=' + heapTotalMb + 'MB' + heapTotalDelta +
+        ' external=' + externalMb + 'MB' + externalDelta
+      );
     } catch (_) {}
   }, MEMORY_LOG_INTERVAL_MS);
 }
@@ -744,7 +817,8 @@ function tryListen(): void {
   httpServer.once('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRINUSE') {
       listenRetryCount++;
-      console.error('[api-server] Port ' + PORT + ' in use (retry ' + listenRetryCount + '/' + MAX_LISTEN_RETRIES + ', next in ' + LISTEN_RETRY_MS + 'ms)');
+      const sec = Math.round(LISTEN_RETRY_MS / 1000);
+      console.error('[api-server] Port ' + PORT + ' already in use. retry #' + listenRetryCount + ' in ' + sec + 's');
       if (listenRetryCount >= MAX_LISTEN_RETRIES) {
         console.error('[api-server] Max listen retries reached, exiting. Stop other process on port ' + PORT + ' or set PORT=3001 in .env');
         process.exit(1);
