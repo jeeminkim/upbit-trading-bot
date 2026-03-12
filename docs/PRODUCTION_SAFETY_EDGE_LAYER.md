@@ -226,3 +226,134 @@ run('normalizationFallbackCount 집계', () => {
 - **reject 시**: reasonCode 필수, context(asset, strategy, edgeScore, threshold, signalScore, regimeScore, liquidityFactor, slippageRiskInverse, recentVolume, avgBucketVolume, surgeValue, rawScore, normalizedScore, fallbackUsed 등) 포함.
 - **observe_only**: allowed=true 유지, wouldReject·shadowReject는 별도 필드로만 전달.
 - **레벨**: info=최종 decision, debug=factor detail, warn=reject. 5분 단위 summary 메트릭 권장.
+
+---
+
+## 14. 6개 위험 포인트 점검 결과 (최종 점검)
+
+### [1] Volume Surge — recentVolume이 "현재 진행 중인 버킷"만 보는지
+
+| 항목 | 결과 |
+|------|------|
+| 구현 | `currentKey = getBucketKey(now)`, `recentVolume` = bucketKey === currentKey 인 버킷의 vol. **진행 중인 버킷** 사용. |
+| 버킷 초반/말미 | 버킷 직후 첫 틱에서 현재 버킷 vol=0 → surgeValue 급락. 말미에 누적 많으면 surge 상승. **경계 변동성 존재.** |
+| 보강 | `volumeSurgeUseCompletedBucket: true` 시 **최근 완성된 10초 버킷**(currentKey-1) 사용. config 기본값 false. |
+| context | `bucketKey`, `bucketProgress`, `useCompletedBucket` 로그로 경계 관찰 가능. |
+
+**위험도**: observe_only에서 먼저 관찰. 경계에서 wouldReject 급증 시 `volumeSurgeUseCompletedBucket: true` 또는 threshold 보수적 상향 검토.
+
+---
+
+### [2] neutral fallback 값
+
+| 위치 | 값 | 비고 |
+|------|-----|------|
+| volumeSurge | `volumeSurgeNeutralFallback` (기본 1.0) | fallback 시 value=1.0, allowed=true. 1.0 = threshold 통과에 유리. |
+| EdgeEstimator factor | null/undefined/NaN → **_clamp01 → 0** | 0.5가 아님. 과차단 가능성 있음. |
+| EdgeEstimator decision | observe_only에서 decision=PASS, wouldReject 별도 | 차단 없음. |
+
+**위험도**: 당장은 허용 가능. factor fallback 0은 보수적. details.fallbackUsed, fallbackValue 로그 추가됨. 필요 시 config에 neutralFallbackValues(예: 0.5) 도입 검토.
+
+---
+
+### [3] observe_only가 downstream에서 무해한지
+
+| 위치 | 점검 |
+|------|------|
+| server.js | `edgeBlock = (edgeResult.decision === 'REJECT' && getMode() === 'hard_gate')` — **decision + mode만 사용.** |
+| server.js | `liquidityBlock = (!liq.allowed && liqMode === 'hard_gate')` — **allowed + hard_gate만.** |
+| server.js | `volumeBlock = (!volResult.allowed && volMode === 'hard_gate')` — **allowed + hard_gate만.** |
+| wouldReject 사용 여부 | **주문 skip 조건에 사용되지 않음.** 로그/메트릭 전용. |
+
+**위험도**: 당장은 허용 가능. 계약 준수됨.
+
+---
+
+### [4] 자산별 pass/reject 메트릭
+
+| 항목 | 결과 |
+|------|------|
+| edge_reject_count 등 | `_ensureKey(obj, symbol)` 로 **자산별(BTC/ETH/SOL/XRP)** 저장됨. |
+| pass count | edge_pass_count 자산별 존재. |
+| 5분 summary | `edgeMetrics.getMetricsSummary()` 추가됨. edgePass, edgeReject, volumeReject, liquidityReject 합계 + byAsset. |
+
+**위험도**: 당장은 허용 가능. getMetricsSummary() 주기 로그로 SOL/XRP reject 과다 검출 가능.
+
+---
+
+### [5] 테스트 통과만으로 충분한지
+
+| 항목 | 결과 |
+|------|------|
+| 버킷 경계 | 테스트에 "버킷 경계: 현재 버킷 vol=0인 구조에서 compute 결과 유효", "compute context에 bucketKey, useCompletedBucket 포함" 추가. |
+| tick cadence | 단위 테스트 수준. 실시간 tick cadence/스트림은 미검증. |
+| observe_only 절차 | 아래 체크리스트로 문서화. |
+
+**위험도**: observe_only에서 먼저 관찰. pseudo-stream 통합 테스트는 나중에 정리 가능.
+
+---
+
+### [6] lib/config.default.js re-export
+
+| 항목 | 결과 |
+|------|------|
+| source of truth | **dashboard/config.default.js**. lib/config.default.js는 `module.exports = require('../config.default')` 단순 re-export. |
+| 동일 객체 | edge 관련 모듈은 동일 config 객체 참조. 불일치 없음. |
+| 문서 | lib/config.default.js 상단 주석에 source of truth 명시됨. |
+
+**위험도**: 당장은 허용 가능. 장기적으로 require 경로 통일 계획만 메모해 두면 됨.
+
+---
+
+## 15. observe_only 운영 전/중/후 체크리스트
+
+### 배포 전
+- [ ] `node tests/edge-layer-production-safety.test.js` 전 항목 통과.
+- [ ] EDGE_LAYER_MODE=observe_only, USE_EDGE_LAYER=1 확인.
+- [ ] server.js에서 차단 조건이 `!*.allowed && *Mode === 'hard_gate'` 만 사용하는지 재확인.
+
+### 운영 중 확인할 로그 포맷 예시
+```
+[EDGE] observe_only PASS { reasonCode: 'PASS', asset: 'BTC', edgeScore: 0.6, threshold: 0.55 }
+[EDGE] observe_only REJECT (no block) { reasonCode: 'EDGE_SCORE_TOO_LOW', wouldReject: true, asset: 'ETH', edgeScore: 0.4 }
+[VOL_SURGE] volume surge computed { market: 'KRW-BTC', recentVolume: 1200, avgBucketVolume: 800, surgeValue: 1.5, bucketKey: ..., bucketProgress: 0.3 }
+[VOL_SURGE] volume surge too low { symbol: 'BTC', value: 1.8, threshold: 2.2, wouldReject: true }
+```
+- [ ] observe_only 기간 중 **실제 매수 체결 건수**가 이전과 비슷한지(감소 없어야 함).
+- [ ] wouldReject/reasonCode 로그가 쌓이는지, reasonCode별·자산별 비율 확인.
+
+### 5분 summary 로그 (권장)
+```js
+const edgeMetrics = require('./lib/strategy/edge/edgeMetrics');
+const summary = edgeMetrics.getMetricsSummary();
+console.info('[EDGE_SUMMARY]', { edgePass: summary.edgePass, edgeReject: summary.edgeReject, volumeReject: summary.volumeReject, byAsset: summary.byAsset });
+```
+
+### 운영 후
+- [ ] SOL/XRP reject 비율이 BTC/ETH 대비 과도하게 높지 않은지.
+- [ ] normalization_fallback_count가 과다하지 않은지.
+- [ ] hard_gate 전환 전 threshold·volumeSurgeUseCompletedBucket 검토.
+
+---
+
+## 16. 문제 검출 시 수정 방향
+
+| 검출 상황 | 최소 수정 |
+|-----------|-----------|
+| 버킷 경계에서 surgeValue 급락·급등 | volumeSurgeUseCompletedBucket: true 또는 threshold 보수적 상향. |
+| factor fallback으로 과차단 | config에 neutralFallbackValues(예: 0.5) 도입, _clamp01 대체. |
+| observe_only인데 주문 감소 | server.js에서 allowed 외 필드(wouldReject 등)로 skip하는 분기 있는지 검색·제거. |
+| SOL/XRP reject 과다 | 자산별 threshold·liquidity multiplier 조정, getMetricsSummary() byAsset로 확인. |
+| config 불일치 의심 | 모든 require가 dashboard/config.default 또는 lib/config.default 경유하는지 확인. |
+
+---
+
+## 17. 지금 바로 수정한 것 vs 나중에 정리해도 되는 것
+
+| 지금 반영함 | 나중에 정리 가능 |
+|-------------|------------------|
+| volumeSurge: volumeSurgeUseCompletedBucket 옵션, bucketKey/bucketProgress/useCompletedBucket context | volumeSurge threshold 보수값 재조정, progress-aware scaling |
+| EdgeEstimator: details.fallbackUsed, fallbackValue | factor별 configurable neutral(0.5) |
+| edgeMetrics.getMetricsSummary(), 자산별 byAsset | 5분 주기 summary 로그 자동 출력(타이머) |
+| lib/config.default.js 주석(source of truth) | require 경로 점진적 통일 |
+| 테스트: 버킷 경계 시나리오, getMetricsSummary 검증 | pseudo-stream 통합 테스트, reasonCode 빈도 스크립트 |

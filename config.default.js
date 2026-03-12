@@ -129,6 +129,8 @@ const EDGE_LAYER = {
     XRP: 2.2
   },
   volumeSurgeNeutralFallback: 1.0,
+  // true면 recentVolume = 최근 완성된 10초 버킷 (경계 변동성 완화). false면 현재 진행 중 버킷.
+  volumeSurgeUseCompletedBucket: false,
   // Liquidity: top3_bid_liquidity_krw > position_size_krw * multiplier
   liquidityMultiplierByAsset: {
     BTC: 3.0,

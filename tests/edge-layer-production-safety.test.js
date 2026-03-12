@@ -119,6 +119,34 @@ function testVolumeSurge() {
     assert(typeof r.avgBucketVolume === 'number');
     assert(typeof r.surgeValue === 'number' || r.surgeValue === r.value);
   });
+
+  run('버킷 경계: 현재 버킷 vol=0인 구조에서 compute 결과 유효', () => {
+    const state = {};
+    const baseKey = Math.floor(Date.now() / BUCKET_MS);
+    const buckets = [];
+    for (let i = 0; i < 10; i++) {
+      buckets.push({ bucketKey: baseKey - 9 + i, vol: 100 });
+    }
+    buckets.push({ bucketKey: baseKey, vol: 0 });
+    state.volumeBuckets10s = { 'KRW-BTC': buckets };
+    const r = compute(state, 'KRW-BTC');
+    assert(r.recentVolume >= 0);
+    assert(r.fallback === true || (typeof r.surgeValue === 'number' && r.surgeValue >= 0 && Number.isFinite(r.surgeValue)));
+  });
+
+  run('compute context에 bucketKey, useCompletedBucket 포함 (정상 경로)', () => {
+    const state = {};
+    const baseKey = Math.floor(Date.now() / BUCKET_MS);
+    const buckets = [];
+    for (let i = 0; i < 8; i++) {
+      buckets.push({ bucketKey: baseKey - 7 + i, vol: 100 });
+    }
+    state.volumeBuckets10s = { 'KRW-XRP': buckets };
+    const r = compute(state, 'KRW-XRP');
+    assert(r.context != null);
+    assert(typeof r.context.bucketKey === 'number');
+    assert(typeof r.context.useCompletedBucket === 'boolean');
+  });
 }
 
 // ——— EdgeEstimator (factor clamp, edgeScore 0~1) ———
@@ -260,6 +288,18 @@ function testMetrics() {
     assert(m.liquidity_reject_count != null);
     assert(m.volume_reject_count != null);
     assert(m.normalization_fallback_count != null);
+  });
+
+  run('getMetricsSummary 자산별 byAsset 및 합계 존재', () => {
+    edgeMetrics.incrementEdgePass('BTC');
+    edgeMetrics.incrementVolumeReject('SOL');
+    const summary = edgeMetrics.getMetricsSummary();
+    assert(typeof summary.edgePass === 'number');
+    assert(typeof summary.edgeReject === 'number');
+    assert(summary.byAsset != null);
+    assert(summary.byAsset.BTC != null);
+    assert(summary.byAsset.SOL != null);
+    assert(summary.byAsset.SOL.volumeReject === 1);
   });
 }
 
