@@ -95,7 +95,7 @@ export const PANEL_ROLE_DEFINITIONS: RoleSpec[] = [
   {
     id: 'A',
     title: '역할 A — 현장 지휘관',
-    description: '엔진 제어 · 실시간 상태 · 체결 보고 · 공격/정지/매도',
+    description: '상태 확인 · 수익 확인 · 즉시 제어 · 전략 조정',
     meaning: '엔진 제어, 실시간 상태 확인, 수익/보유/체결 기반 즉시 액션, 공격/중지/매도 같은 즉시 운용 판단',
     buttons: [
       'engine_start',
@@ -114,7 +114,7 @@ export const PANEL_ROLE_DEFINITIONS: RoleSpec[] = [
   {
     id: 'B',
     title: '역할 B — 정보 분석가',
-    description: 'AI 타점 · 시황 요약 · 급등주/주요지표 · 거래 부재 진단 · 최근스캘/체결 · 로직 제안 · 조언 · 로그 분석',
+    description: 'AI 분석 · 시황 요약 · 주요지표 · 거래 리뷰 · 개선 제안',
     meaning: 'AI 분석, 시황 요약, 주요 지표, 거래 부재 진단, 최근 체결/스캘/로그 리뷰/조언',
     buttons: [
       'ai_entry_analysis',
@@ -158,6 +158,24 @@ export const ROLE_LAYOUT_IDEAL_SPEC: Record<RoleType, LayoutRowSpec[]> = {
 };
 
 // ---------------------------------------------------------------------------
+// ROLE_PANEL_LAYOUT_SPEC — 역할별 메시지 1개당 버튼 row (역할 제목 아래 해당 역할 버튼만)
+// ---------------------------------------------------------------------------
+/** 역할별 패널 메시지용 row 구성. 메시지당 최대 5 row, row당 최대 5 버튼. */
+export const ROLE_PANEL_LAYOUT_SPEC: Record<RoleType, LayoutRowSpec[]> = {
+  A: [
+    ['engine_start', 'engine_stop', 'current_status', 'current_strategy', 'current_pnl'],
+    ['sell_all', 'race_horse_toggle', 'relax_threshold', 'scalp_attack', 'scalp_stop'],
+    ['strategy_menu'],
+  ],
+  B: [
+    ['ai_entry_analysis', 'market_summary', 'surge_analysis', 'key_indicators'],
+    ['no_trade_diagnosis', 'recent_scalp', 'recent_fills'],
+    ['logic_suggestion', 'advisor_comment', 'daily_log_analysis'],
+  ],
+  C: [['health_check', 'emergency_control', 'api_usage', 'system_update']],
+};
+
+// ---------------------------------------------------------------------------
 // 버튼 정의 (key = custom_id, label/style 고정)
 // ---------------------------------------------------------------------------
 export const PANEL_BUTTON_DEFINITIONS: Record<ButtonKey, Omit<ButtonSpec, 'key'>> = {
@@ -190,11 +208,12 @@ export const PANEL_BUTTON_DEFINITIONS: Record<ButtonKey, Omit<ButtonSpec, 'key'>
 
 // ---------------------------------------------------------------------------
 // PANEL_LAYOUT_SPEC — 단일 메시지 모드(single)에서만 사용하는 실제 Discord row 배치 (최대 5 row)
+// Row1: 상태/전략/수익·즉시 조치  Row2: 모드/기준/공격/전략 조정  Row3~4: 역할 B  Row5: 역할 C
 // ---------------------------------------------------------------------------
 export const PANEL_LAYOUT_SPEC: LayoutRowSpec[] = [
-  ['engine_start', 'engine_stop', 'current_status', 'current_pnl', 'sell_all'],
-  ['race_horse_toggle', 'relax_threshold', 'scalp_attack', 'scalp_stop', 'strategy_menu'],
-  ['current_strategy', 'ai_entry_analysis', 'market_summary', 'surge_analysis', 'key_indicators'],
+  ['engine_start', 'engine_stop', 'current_status', 'current_strategy', 'current_pnl'],
+  ['sell_all', 'race_horse_toggle', 'relax_threshold', 'scalp_attack', 'strategy_menu'],
+  ['scalp_stop', 'ai_entry_analysis', 'market_summary', 'surge_analysis', 'key_indicators'],
   ['no_trade_diagnosis', 'recent_scalp', 'recent_fills', 'logic_suggestion', 'advisor_comment'],
   ['daily_log_analysis', 'health_check', 'emergency_control', 'api_usage', 'system_update'],
 ];
@@ -302,6 +321,35 @@ export function validatePanelDefinitions(): boolean {
         }
         if (!roleButtonSet.has(k)) {
           LogUtil.logError(LOG_TAG, 'validatePanelDefinitions: ROLE_LAYOUT_IDEAL_SPEC button not in role', { roleId, key: k });
+          ok = false;
+        }
+      }
+    }
+  }
+
+  // --- ROLE_PANEL_LAYOUT_SPEC (역할별 메시지용 row) ---
+  for (const roleId of ROLE_TYPES) {
+    const panelRows = ROLE_PANEL_LAYOUT_SPEC[roleId];
+    const roleSpec = roleDefMap.get(roleId);
+    if (!roleSpec || !panelRows) continue;
+    const roleButtonSet = new Set<ButtonKey>(roleSpec.buttons);
+    if (panelRows.length > DISCORD_MAX_ROWS_PER_MESSAGE) {
+      LogUtil.logError(LOG_TAG, 'validatePanelDefinitions: ROLE_PANEL_LAYOUT_SPEC row count > 5', { roleId, rows: panelRows.length });
+      ok = false;
+    }
+    for (let ri = 0; ri < panelRows.length; ri++) {
+      const row = panelRows[ri];
+      if (row.length > DISCORD_MAX_BUTTONS_PER_ROW) {
+        LogUtil.logError(LOG_TAG, 'validatePanelDefinitions: ROLE_PANEL_LAYOUT_SPEC row buttons > 5', { roleId, rowIndex: ri, count: row.length });
+        ok = false;
+      }
+      for (const k of row) {
+        if (!definedKeys.has(k)) {
+          LogUtil.logError(LOG_TAG, 'validatePanelDefinitions: ROLE_PANEL_LAYOUT_SPEC references undefined button key', { roleId, key: k });
+          ok = false;
+        }
+        if (!roleButtonSet.has(k)) {
+          LogUtil.logError(LOG_TAG, 'validatePanelDefinitions: ROLE_PANEL_LAYOUT_SPEC button not in role', { roleId, key: k });
           ok = false;
         }
       }
@@ -444,6 +492,41 @@ export function buildPanelComponents(model: PanelModel, options?: BuildPanelOpti
   // fallback: paged인데 activeRole 없거나 잘못됨 → single 레이아웃 사용
   const rows: ActionRowPayload[] = [];
   for (const rowSpec of PANEL_LAYOUT_SPEC) {
+    const row = rowSpecToActionRow(rowSpec);
+    if (row) rows.push(row);
+    if (rows.length >= DISCORD_MAX_ROWS_PER_MESSAGE) break;
+  }
+  return rows;
+}
+
+// ---------------------------------------------------------------------------
+// 역할별 패널 메시지용 content / components (역할 제목 바로 아래 해당 역할 버튼만)
+// ---------------------------------------------------------------------------
+/** 역할별 단일 메시지 본문: 제목 + 설명만. */
+export function buildRolePanelContent(role: RoleType, options?: { lastUpdatedAt?: string }): string {
+  const spec = PANEL_ROLE_DEFINITIONS.find((r) => r.id === role);
+  if (!spec) return `[${PANEL_CONTENT_VERSION}]\n역할 ${role} (정의 없음)`;
+  const lines: string[] = [];
+  lines.push(`[${PANEL_CONTENT_VERSION}]`);
+  if (options?.lastUpdatedAt) {
+    try {
+      const d = new Date(options.lastUpdatedAt);
+      const kst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
+      lines.push(`마지막 갱신: ${kst.toISOString().slice(0, 19).replace('T', ' ')} KST`);
+    } catch (_) {}
+  }
+  lines.push('');
+  lines.push(`**${spec.title}**`);
+  lines.push(spec.description);
+  return lines.join('\n').trimEnd();
+}
+
+/** 역할별 단일 메시지용 버튼 row (ROLE_PANEL_LAYOUT_SPEC 기준). */
+export function buildRolePanelComponents(role: RoleType): ActionRowPayload[] {
+  const rowsSpec = ROLE_PANEL_LAYOUT_SPEC[role];
+  if (!rowsSpec) return [];
+  const rows: ActionRowPayload[] = [];
+  for (const rowSpec of rowsSpec) {
     const row = rowSpecToActionRow(rowSpec);
     if (row) rows.push(row);
     if (rows.length >= DISCORD_MAX_ROWS_PER_MESSAGE) break;

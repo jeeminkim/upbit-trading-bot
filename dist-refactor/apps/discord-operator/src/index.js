@@ -15,6 +15,21 @@ const AuditLogService_1 = require("../../../packages/core/src/AuditLogService");
 const ConfirmFlow_1 = require("../../../packages/core/src/ConfirmFlow");
 const LogUtil_1 = require("../../../packages/core/src/LogUtil");
 const errors_1 = require("../../../packages/shared/src/errors");
+const panelContract_1 = require("./panelContract");
+/** panelContract의 ActionRowPayload[]를 Discord.js v13 MessageActionRow[]로 변환 (edit/send 시 버튼이 보이도록) */
+function toDiscordComponents(rows) {
+    return rows.map((row) => {
+        const actionRow = new discord_js_1.MessageActionRow();
+        for (const comp of row.components) {
+            const btn = new discord_js_1.MessageButton()
+                .setCustomId(comp.custom_id)
+                .setLabel(comp.label)
+                .setStyle(comp.style);
+            actionRow.addComponents(btn);
+        }
+        return actionRow;
+    });
+}
 const LOG_TAG = 'DISCORD_OP';
 /** PANEL_RESTORE 진단 로그 — LOG_LEVEL 무관하게 항상 출력 (logWarn 사용) */
 function panelRestoreWarn(tag, detail) {
@@ -28,6 +43,26 @@ function panelRestoreFail(tag, err, extra) {
 }
 // ===== DISCORD OPERATOR BOOT DIAGNOSTIC (timestamp 항상 포함) =====
 LogUtil_1.LogUtil.logInfo(LOG_TAG, 'process start', { cwd: process.cwd(), pid: process.pid, node: process.version });
+let packageVersion;
+try {
+    const pkg = require(path_1.default.join(process.cwd(), 'package.json'));
+    packageVersion = pkg?.version;
+}
+catch {
+    packageVersion = process.env.npm_package_version;
+}
+const scriptPath = process.argv[1] ?? 'unknown';
+LogUtil_1.LogUtil.logWarn(LOG_TAG, '[BOOT][BUILD_INFO]', {
+    pid: process.pid,
+    cwd: process.cwd(),
+    scriptPath,
+    argv: process.argv,
+    nodeVersion: process.version,
+    PANEL_LAYOUT_VERSION: panelContract_1.PANEL_LAYOUT_VERSION,
+    PANEL_CONTENT_VERSION: panelContract_1.PANEL_CONTENT_VERSION,
+    renderModeDefault: 'single',
+    packageVersion: packageVersion ?? 'unknown',
+});
 process.on('uncaughtException', (err) => {
     LogUtil_1.LogUtil.logError(LOG_TAG, 'uncaughtException', { message: err.message, stack: err.stack });
 });
@@ -55,6 +90,8 @@ if (!process.env.DISCORD_CLIENT_ID?.trim() || !process.env.DISCORD_GUILD_ID?.tri
         LogUtil_1.LogUtil.logDebug(LOG_TAG, 'DISCORD_CLIENT_ID/GUILD_ID 미설정 — 전역 슬래시 명령 등록');
 }
 const adminId = (process.env.ADMIN_ID || process.env.DISCORD_ADMIN_ID || '').trim();
+// 고정 패널 규약 검증 — 앱 시작 시 1회. 오류 시 경고 후 fallback 레이아웃 사용
+(0, panelContract_1.validatePanelDefinitions)();
 const DASHBOARD_URL = (process.env.DASHBOARD_URL || process.env.API_URL || 'http://localhost:3000').replace(/\/$/, '');
 LogUtil_1.LogUtil.logInfo(LOG_TAG, 'creating client');
 const client = new discord_js_1.Client({ intents: [Intents?.FLAGS?.GUILDS ?? 1] });
@@ -225,66 +262,6 @@ function scheduleHourlyHealthDm() {
 }
 const fs = require('fs');
 const PANEL_FILE = path_1.default.join(process.cwd(), 'state', 'discord-panel.json');
-/** 역할 A(현장 지휘관) / B(정보 분석가) / C(서버 관리자) — 한 메시지 내 최대 5 row, row당 5버튼. 전략 4종은 메인에 두지 않고 "전략" 버튼 클릭 시에만 노출. */
-function buildPanelComponents() {
-    return [
-        // 역할 A — Row 1: 엔진 제어 + 상태/수익률 + 전체 매도
-        {
-            type: 1,
-            components: [
-                { type: 2, style: 3, custom_id: 'engine_start', label: '엔진 가동' },
-                { type: 2, style: 4, custom_id: 'engine_stop', label: '즉시 정지' },
-                { type: 2, style: 2, custom_id: 'current_state', label: '현재 상태' },
-                { type: 2, style: 2, custom_id: 'current_return', label: '현재 수익률' },
-                { type: 2, style: 4, custom_id: 'sell_all', label: '전체 매도' },
-            ],
-        },
-        // 역할 A — Row 2: 경주마, 완화, 초공격 scalp, 전략(하위 메뉴 진입)
-        {
-            type: 1,
-            components: [
-                { type: 2, style: 2, custom_id: 'race_horse_toggle', label: '경주마 ON/OFF' },
-                { type: 2, style: 2, custom_id: 'relax_toggle', label: '기준 완화' },
-                { type: 2, style: 1, custom_id: 'independent_scalp_start', label: '초공격 scalp' },
-                { type: 2, style: 2, custom_id: 'independent_scalp_stop', label: 'scalp 중지' },
-                { type: 2, style: 1, custom_id: 'strategy_menu', label: '전략' },
-            ],
-        },
-        // 역할 A — Row 3: 현재전략, 최근스킵, 최근체결 + 역할 C 1개
-        {
-            type: 1,
-            components: [
-                { type: 2, style: 1, custom_id: 'strategy_view_config', label: '현재전략' },
-                { type: 2, style: 2, custom_id: 'strategy_skip_recent', label: '최근스킵' },
-                { type: 2, style: 2, custom_id: 'strategy_buy_recent', label: '최근체결' },
-                { type: 2, style: 2, custom_id: 'health', label: '헬스' },
-                { type: 2, style: 4, custom_id: 'admin_emergency_menu', label: '비상 제어' },
-            ],
-        },
-        // 역할 B — Row 4: AI 타점, 시황, 급등주, 주요지표, 거래 부재 진단
-        {
-            type: 1,
-            components: [
-                { type: 2, style: 1, custom_id: 'ai_analysis', label: 'AI 타점 분석' },
-                { type: 2, style: 1, custom_id: 'analyst_get_prompt', label: '시황 요약' },
-                { type: 2, style: 2, custom_id: 'analyst_scan_vol', label: '급등주 분석' },
-                { type: 2, style: 2, custom_id: 'analyst_indicators', label: '주요지표' },
-                { type: 2, style: 2, custom_id: 'analyst_diagnose_no_trade', label: '거래 부재 진단' },
-            ],
-        },
-        // 역할 B + C — Row 5: 로직 제안, 조언자, 일일 로그, API 사용량, 시스템 업데이트
-        {
-            type: 1,
-            components: [
-                { type: 2, style: 2, custom_id: 'analyst_suggest_logic', label: '로직 수정안 제안' },
-                { type: 2, style: 2, custom_id: 'analyst_advisor_one_liner', label: '조언자의 한마디' },
-                { type: 2, style: 2, custom_id: 'daily_log_analysis', label: '하루치 로그 분석' },
-                { type: 2, style: 2, custom_id: 'api_usage_monitor', label: 'API 사용량' },
-                { type: 2, style: 1, custom_id: 'admin_git_pull_restart', label: '시스템 업데이트' },
-            ],
-        },
-    ];
-}
 /** 전략 하위 메뉴: SAFE / A-보수적 / A-균형형 / A-적극형 (strategy_menu 클릭 시에만 표시) */
 function buildStrategySubmenuComponents() {
     return [
@@ -312,43 +289,26 @@ function buildEmergencySubmenuComponents() {
         },
     ];
 }
-/** 패널 복구: content + components 반드시 적용. 성공 시 true, 실패 시 false. 진단 로그는 LogUtil.logWarn/logError로 항상 출력 */
-async function restorePanel(channel) {
-    const panelContent = [
-        '🎮 **자동매매 통제 패널**',
-        '',
-        '**역할 A — 현장 지휘관** (엔진 제어 · 실시간 상태 · 체결 보고)',
-        '**역할 B — 정보 분석가** (AI 실시간 타점 분석 · 시황 요약 · 주요지표 · 거래 부재 진단)',
-        '**역할 C — 서버 관리자** (시스템 업데이트 · 프로세스 재기동)',
-    ].join('\n');
-    const components = buildPanelComponents();
-    const rows = Array.isArray(components) ? components.length : 0;
-    const counts = Array.isArray(components)
-        ? components.map((r) => (Array.isArray(r?.components) ? r.components.length : 0))
-        : [];
-    const countsStr = counts.join(',');
-    const firstIds = Array.isArray(components)
-        ? components.slice(0, 2).map((r) => (r?.components?.[0]?.custom_id ?? '—')).join(',')
-        : '—';
-    const invalidRows = rows > 5 || rows === 0;
-    const invalidCounts = counts.some((c) => c > 5 || c === 0);
-    if (invalidRows || invalidCounts) {
-        panelRestoreFail('COMPONENTS_INVALID', new Error('rows or button count out of limit'), { rows, counts: countsStr });
-    }
-    else {
-        panelRestoreWarn('COMPONENTS_BUILT', { rows, counts: countsStr, firstIds });
-    }
-    let panelData = {};
+/** 역할별 패널 3개 복구/생성: A → B → C 순서로 메시지 각각 fetch/edit 또는 send. */
+async function restoreOrCreateRolePanels(channel) {
+    const t0 = Date.now();
+    const lastUpdatedAt = new Date().toISOString();
+    const dir = path_1.default.join(process.cwd(), 'state');
+    if (!fs.existsSync(dir))
+        fs.mkdirSync(dir, { recursive: true });
+    let state = {};
     try {
         if (fs.existsSync(PANEL_FILE)) {
             const raw = fs.readFileSync(PANEL_FILE, 'utf8');
-            panelData = JSON.parse(raw);
-            panelRestoreWarn('STATE_LOADED', {
-                found: true,
-                channelId: panelData.channelId,
-                messageId: panelData.panelMessageId,
-                updatedAt: panelData.updatedAt ?? null,
-            });
+            const parsed = JSON.parse(raw);
+            state = {
+                channelId: typeof parsed.channelId === 'string' ? parsed.channelId : undefined,
+                roleAMessageId: typeof parsed.roleAMessageId === 'string' ? parsed.roleAMessageId : undefined,
+                roleBMessageId: typeof parsed.roleBMessageId === 'string' ? parsed.roleBMessageId : undefined,
+                roleCMessageId: typeof parsed.roleCMessageId === 'string' ? parsed.roleCMessageId : undefined,
+                updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : undefined,
+            };
+            panelRestoreWarn('STATE_LOADED', { channelId: state.channelId, roleA: state.roleAMessageId, roleB: state.roleBMessageId, roleC: state.roleCMessageId });
         }
         else {
             panelRestoreWarn('STATE_LOADED', { found: false, reason: 'no state file' });
@@ -357,79 +317,97 @@ async function restorePanel(channel) {
     catch (e) {
         panelRestoreFail('STATE_LOAD_FAIL', e, { panelFile: PANEL_FILE });
     }
-    panelRestoreWarn('START', {
-        channelId: channel?.id,
-        savedPanelMessageId: panelData.panelMessageId ?? null,
-        savedChannelId: panelData.channelId ?? null,
-        panelFile: PANEL_FILE,
-    });
-    const dir = path_1.default.join(process.cwd(), 'state');
-    if (!fs.existsSync(dir))
-        fs.mkdirSync(dir, { recursive: true });
-    const channelIdMatch = panelData.channelId && String(panelData.channelId) === String(channel.id);
-    const hasSavedMessage = !!(panelData.panelMessageId && channelIdMatch);
-    if (panelData.panelMessageId && !channelIdMatch) {
-        panelRestoreWarn('CHANNEL_MISMATCH', { savedChannelId: panelData.channelId, currentChannelId: channel.id, willSendNew: true });
-    }
-    if (hasSavedMessage) {
-        const messageId = panelData.panelMessageId;
-        panelRestoreWarn('FETCH_EXISTING', { channelId: channel.id, messageId });
-        let msg;
-        try {
-            msg = await channel.messages.fetch(messageId);
-            panelRestoreWarn('FETCH_EXISTING_OK', { messageId });
-        }
-        catch (e) {
-            panelRestoreFail('FETCH_EXISTING_FAIL', e, { messageId });
-            // fall through to SEND_NEW
-        }
-        if (msg) {
+    const channelIdMatch = state.channelId && String(state.channelId) === String(channel.id);
+    const forceNewPanel = process.env.FORCE_NEW_PANEL_ON_RESTART === 'true';
+    const roles = ['A', 'B', 'C'];
+    const result = {};
+    const messageIdKeys = ['roleAMessageId', 'roleBMessageId', 'roleCMessageId'];
+    for (let i = 0; i < roles.length; i++) {
+        const role = roles[i];
+        const messageIdKey = messageIdKeys[i];
+        let savedId = state[messageIdKey];
+        if (forceNewPanel || !channelIdMatch)
+            savedId = undefined;
+        const content = (0, panelContract_1.buildRolePanelContent)(role, { lastUpdatedAt });
+        const components = (0, panelContract_1.buildRolePanelComponents)(role);
+        const discordComponents = toDiscordComponents(components);
+        let finalId;
+        if (savedId) {
             try {
-                panelRestoreWarn('EDIT_START', { messageId: msg.id, contentLen: panelContent.length, rows });
-                await msg.edit({ content: panelContent, components });
-                panelRestoreWarn('EDIT_OK', { messageId: msg.id });
-                try {
-                    fs.writeFileSync(PANEL_FILE, JSON.stringify({ channelId: channel.id, panelMessageId: msg.id }));
-                    panelRestoreWarn('STATE_SAVE_OK', { channelId: channel.id, messageId: msg.id });
-                }
-                catch (saveErr) {
-                    panelRestoreFail('STATE_SAVE_FAIL', saveErr, { after: 'edit', channelId: channel.id, messageId: msg.id });
-                }
-                panelRestoreWarn('DONE', { restored: true, mode: 'edit', panelMessageId: msg.id });
-                return true;
+                const msg = await channel.messages.fetch(savedId);
+                await msg.edit({ content, components: discordComponents });
+                finalId = msg.id;
+                if (role === 'A')
+                    result.roleA = 'edit';
+                else if (role === 'B')
+                    result.roleB = 'edit';
+                else
+                    result.roleC = 'edit';
+                panelRestoreWarn('ROLE_PANEL_EDIT', { role, messageId: finalId });
             }
             catch (e) {
-                panelRestoreFail('EDIT_FAIL', e, { messageId: msg.id, contentLen: panelContent.length, rows });
+                panelRestoreWarn('ROLE_PANEL_FETCH_FAIL', { role, messageId: savedId, willSendNew: true });
+                const sent = await channel.send({ content, components: discordComponents });
+                finalId = sent.id;
+                if (role === 'A')
+                    result.roleA = 'new';
+                else if (role === 'B')
+                    result.roleB = 'new';
+                else
+                    result.roleC = 'new';
+                panelRestoreWarn('ROLE_PANEL_SEND', { role, messageId: finalId });
             }
         }
+        else {
+            const sent = await channel.send({ content, components: discordComponents });
+            finalId = sent.id;
+            if (role === 'A')
+                result.roleA = 'new';
+            else if (role === 'B')
+                result.roleB = 'new';
+            else
+                result.roleC = 'new';
+            panelRestoreWarn('ROLE_PANEL_SEND', { role, messageId: finalId });
+        }
+        state[messageIdKey] = finalId;
     }
-    panelRestoreWarn('SEND_NEW_START', { channelId: channel.id, contentLen: panelContent.length, rows });
+    state.channelId = channel.id;
+    state.updatedAt = lastUpdatedAt;
     try {
-        const msg = await channel.send({ content: panelContent, components });
-        panelRestoreWarn('SEND_NEW_OK', { messageId: msg.id });
-        try {
-            fs.writeFileSync(PANEL_FILE, JSON.stringify({ channelId: channel.id, panelMessageId: msg.id }));
-            panelRestoreWarn('STATE_SAVE_OK', { channelId: channel.id, messageId: msg.id });
-        }
-        catch (saveErr) {
-            panelRestoreFail('STATE_SAVE_FAIL', saveErr, { after: 'send', channelId: channel.id, messageId: msg.id });
-        }
-        panelRestoreWarn('DONE', { restored: true, mode: 'new', panelMessageId: msg.id, restartMessageSeparate: true });
-        return true;
+        fs.writeFileSync(PANEL_FILE, JSON.stringify(state));
+        panelRestoreWarn('STATE_SAVE_OK', { channelId: channel.id, roleA: state.roleAMessageId, roleB: state.roleBMessageId, roleC: state.roleCMessageId });
     }
-    catch (e) {
-        panelRestoreFail('SEND_NEW_FAIL', e, { channelId: channel.id, contentLen: panelContent.length, rows });
-        panelRestoreWarn('DONE', { restored: false, reason: 'send_failed' });
-        return false;
+    catch (saveErr) {
+        panelRestoreFail('STATE_SAVE_FAIL', saveErr, { channelId: channel.id });
     }
+    const totalRestoreMs = Date.now() - t0;
+    const allEdit = result.roleA === 'edit' && result.roleB === 'edit' && result.roleC === 'edit';
+    const anyNew = result.roleA === 'new' || result.roleB === 'new' || result.roleC === 'new';
+    const statusText = allEdit ? '역할별 패널 3건 복구 완료' : anyNew ? '역할별 패널 일부 신규 생성' : '역할별 패널 복구 완료';
+    panelRestoreWarn('PANEL_RESTORE_DONE', { restored: true, roleA: result.roleA, roleB: result.roleB, roleC: result.roleC, totalRestoreMs });
+    return {
+        restored: true,
+        statusText,
+        durationMs: totalRestoreMs,
+        roleA: result.roleA,
+        roleB: result.roleB,
+        roleC: result.roleC,
+    };
 }
-/** 재기동 안내 메시지. panelRestored=true일 때만 "패널 상태 : 복구 완료" 표시 */
-async function sendRestartMessage(channel, panelRestored) {
+/** 재기동 안내 메시지. result.statusText·durationMs 반영 */
+async function sendRestartMessage(channel, result) {
+    const policy = 'always send';
+    panelRestoreWarn('RESTART_MESSAGE_POLICY', {
+        policy,
+        startupMessageSentAlready: startupMessageSent,
+        willSend: !startupMessageSent,
+    });
     if (startupMessageSent)
         return;
-    const panelStatus = panelRestored ? '복구 완료' : '복구 실패 (로그 확인)';
-    panelRestoreWarn('RESTART_MESSAGE', { panelRestored, panelStatusText: panelStatus });
+    const statusText = result.statusText;
+    panelRestoreWarn('RESTART_MESSAGE', { panelRestored: result.restored, mode: result.mode, statusText, durationMs: result.durationMs });
     try {
+        const durationLine = result.durationMs != null ? `\n패널 복구 소요: ${result.durationMs} ms` : '';
         const text = [
             '🚀 **시스템 재기동 되었습니다**',
             '',
@@ -437,20 +415,24 @@ async function sendRestartMessage(channel, panelRestored) {
             'Market Bot       : 연결 확인',
             'API Server       : 정상',
             '',
-            `패널 상태 : ${panelStatus}`,
+            `패널 상태 : ${statusText}${durationLine}`,
         ].join('\n');
         const restartMsg = await channel.send({ content: text });
         startupMessageSent = true;
-        panelRestoreWarn('RESTART_MESSAGE_SENT', { restartMessageId: restartMsg?.id ?? null, panelRestored });
+        panelRestoreWarn('RESTART_MESSAGE_SENT', { restartMessageId: restartMsg?.id ?? null, panelRestored: result.restored, statusText });
+        panelRestoreWarn('RESTART_MESSAGE_POLICY', { policy, restartMessageSend: true, restartMessageId: restartMsg?.id ?? null });
     }
     catch (e) {
-        panelRestoreFail('RESTART_MESSAGE_FAIL', e, { panelRestored });
+        panelRestoreFail('RESTART_MESSAGE_FAIL', e, { panelRestored: result.restored });
         LogUtil_1.LogUtil.logError(LOG_TAG, 'Restart message send failed', { message: e.message });
+        panelRestoreWarn('RESTART_MESSAGE_POLICY', { policy, restartMessageSend: false, error: e.message });
     }
 }
 async function handleButton(interaction) {
     const userId = interaction.user?.id ?? '';
     const customId = interaction.customId;
+    /** 레거시 customId → 표준 버튼 키. 패널 버튼은 표준 키 기준으로 분기 */
+    const key = (0, panelContract_1.normalizeButtonId)(customId);
     if (customId.startsWith('confirm_')) {
         const tokenId = customId.replace('confirm_', '');
         const consumed = ConfirmFlow_1.ConfirmFlow.consume(tokenId, userId);
@@ -497,8 +479,29 @@ async function handleButton(interaction) {
         await interaction.update({ content: '취소되었습니다.', components: [] }).catch(() => { });
         return;
     }
+    // ---------- 페이지형 UI 확장 포인트 (상위 메뉴 버튼: panel_role_A / panel_role_B / panel_role_C / panel_back_home) ----------
+    if (customId === 'panel_role_A') {
+        // TODO: render paged A — 패널 메시지 편집하여 buildPanelComponents(model, { renderMode: 'paged', activeRole: 'A' }) + buildPanelContent(..., { renderMode: 'paged', activeRole: 'A' }) 반영
+        await interaction.reply({ content: '페이지형 UI(역할 A) 전환은 준비 중입니다.', ephemeral: true }).catch(() => { });
+        return;
+    }
+    if (customId === 'panel_role_B') {
+        // TODO: render paged B — buildPanelComponents(model, { renderMode: 'paged', activeRole: 'B' })
+        await interaction.reply({ content: '페이지형 UI(역할 B) 전환은 준비 중입니다.', ephemeral: true }).catch(() => { });
+        return;
+    }
+    if (customId === 'panel_role_C') {
+        // TODO: render paged C — buildPanelComponents(model, { renderMode: 'paged', activeRole: 'C' })
+        await interaction.reply({ content: '페이지형 UI(역할 C) 전환은 준비 중입니다.', ephemeral: true }).catch(() => { });
+        return;
+    }
+    if (customId === 'panel_back_home') {
+        // TODO: render single home — buildPanelComponents(model, { renderMode: 'single' }), buildPanelContent(..., { renderMode: 'single' })
+        await interaction.reply({ content: '홈 패널 전환은 준비 중입니다.', ephemeral: true }).catch(() => { });
+        return;
+    }
     // 전략 하위 메뉴: "전략" 버튼 클릭 시에만 SAFE / A-보수적 / A-균형형 / A-적극형 노출
-    if (customId === 'strategy_menu') {
+    if (key === 'strategy_menu') {
         await interaction.reply({
             content: '**전략 선택** — 아래에서 모드를 선택하세요.',
             components: buildStrategySubmenuComponents(),
@@ -507,7 +510,7 @@ async function handleButton(interaction) {
         return;
     }
     // 엔진 가동 버튼 (확인 없이 즉시 API 호출)
-    if (customId === 'engine_start') {
+    if (key === 'engine_start') {
         const ctx = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
         if (!PermissionService_1.PermissionService.can(ctx, 'engine_start')) {
             await interaction.reply({ content: '권한 없음 (엔진 가동은 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
@@ -529,7 +532,7 @@ async function handleButton(interaction) {
         return;
     }
     // 즉시 정지 — 2단계 확인
-    if (customId === 'engine_stop') {
+    if (key === 'engine_stop') {
         const ctx = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
         if (!PermissionService_1.PermissionService.can(ctx, 'engine_stop')) {
             await interaction.reply({ content: '권한 없음 (즉시 정지는 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
@@ -546,7 +549,7 @@ async function handleButton(interaction) {
         return;
     }
     // 전체 매도 — 2단계 확인
-    if (customId === 'sell_all') {
+    if (key === 'sell_all') {
         const ctx = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
         if (!PermissionService_1.PermissionService.can(ctx, 'sell_all')) {
             await interaction.reply({ content: '권한 없음 (전체 매도는 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
@@ -603,7 +606,7 @@ async function handleButton(interaction) {
         }
         return;
     }
-    if (customId === 'strategy_view_config') {
+    if (key === 'current_strategy') {
         await interaction.deferReply({ ephemeral: true }).catch(() => { });
         try {
             const data = await api('/api/strategy-config');
@@ -617,7 +620,7 @@ async function handleButton(interaction) {
         }
         return;
     }
-    if (customId === 'strategy_skip_recent') {
+    if (key === 'recent_scalp') {
         await interaction.deferReply({ ephemeral: true }).catch(() => { });
         try {
             const data = await api('/api/strategy-status');
@@ -634,7 +637,7 @@ async function handleButton(interaction) {
         }
         return;
     }
-    if (customId === 'strategy_buy_recent') {
+    if (key === 'recent_fills') {
         await interaction.deferReply({ ephemeral: true }).catch(() => { });
         try {
             const data = await api('/api/strategy-status');
@@ -652,7 +655,7 @@ async function handleButton(interaction) {
         return;
     }
     // ——— 역할 A: 경주마, 기준 완화, 초공격 scalp (market-bot proxy) ———
-    if (customId === 'race_horse_toggle') {
+    if (key === 'race_horse_toggle') {
         const ctxRh = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
         if (!PermissionService_1.PermissionService.can(ctxRh, 'race_horse_toggle')) {
             await interaction.reply({ content: '권한 없음 (경주마 모드는 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
@@ -669,7 +672,7 @@ async function handleButton(interaction) {
         }
         return;
     }
-    if (customId === 'relax_toggle') {
+    if (key === 'relax_threshold') {
         const ctxRelax = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
         if (!PermissionService_1.PermissionService.can(ctxRelax, 'relax_toggle')) {
             await interaction.reply({ content: '권한 없음 (기준 완화는 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
@@ -718,7 +721,7 @@ async function handleButton(interaction) {
         }
         return;
     }
-    if (customId === 'independent_scalp_start') {
+    if (key === 'scalp_attack') {
         const ctxScalp = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
         if (!PermissionService_1.PermissionService.can(ctxScalp, 'independent_scalp_start')) {
             await interaction.reply({ content: '권한 없음 (초공격 scalp는 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
@@ -746,7 +749,7 @@ async function handleButton(interaction) {
         }
         return;
     }
-    if (customId === 'independent_scalp_stop') {
+    if (key === 'scalp_stop') {
         const ctxScalpStop = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
         if (!PermissionService_1.PermissionService.can(ctxScalpStop, 'independent_scalp_stop')) {
             await interaction.reply({ content: '권한 없음.', ephemeral: true }).catch(() => { });
@@ -780,7 +783,7 @@ async function handleButton(interaction) {
         return;
     }
     // ——— 역할 B: AI 타점, 거래 부재 진단, 로직 제안, 조언자, 일일 로그, API 사용량 (market-bot proxy) ———
-    if (customId === 'ai_analysis') {
+    if (key === 'ai_entry_analysis') {
         await interaction.deferReply({ ephemeral: true }).catch(() => { });
         try {
             const result = await api('/api/ai_analysis');
@@ -792,16 +795,16 @@ async function handleButton(interaction) {
         }
         return;
     }
-    if (customId === 'analyst_diagnose_no_trade' || customId === 'analyst_suggest_logic') {
+    if (key === 'no_trade_diagnosis' || key === 'logic_suggestion') {
         const ctxDiag = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
-        if (!PermissionService_1.PermissionService.can(ctxDiag, customId)) {
+        if (!PermissionService_1.PermissionService.can(ctxDiag, key)) {
             await interaction.reply({ content: '권한 없음 (거래 부재 진단/로직 제안은 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
             return;
         }
         await interaction.deferReply({ ephemeral: true }).catch(() => { });
         try {
-            const path = customId === 'analyst_diagnose_no_trade' ? '/api/analyst/diagnose_no_trade' : '/api/analyst/suggest_logic';
-            const embedJson = await api(path);
+            const apiPath = key === 'no_trade_diagnosis' ? '/api/analyst/diagnose_no_trade' : '/api/analyst/suggest_logic';
+            const embedJson = await api(apiPath);
             const embed = new discord_js_1.MessageEmbed(embedJson);
             await interaction.editReply({ embeds: [embed] }).catch(() => { });
         }
@@ -810,15 +813,15 @@ async function handleButton(interaction) {
         }
         return;
     }
-    if (customId === 'analyst_advisor_one_liner' || customId === 'daily_log_analysis' || customId === 'api_usage_monitor') {
+    if (key === 'advisor_comment' || key === 'daily_log_analysis' || key === 'api_usage') {
         await interaction.deferReply({ ephemeral: true }).catch(() => { });
         try {
-            const path = customId === 'analyst_advisor_one_liner'
+            const apiPath = key === 'advisor_comment'
                 ? '/api/analyst/advisor_one_liner'
-                : customId === 'daily_log_analysis'
+                : key === 'daily_log_analysis'
                     ? '/api/analyst/daily_log_analysis'
                     : '/api/analyst/api_usage_monitor';
-            const result = await api(path);
+            const result = await api(apiPath);
             const text = (result?.content ?? '').slice(0, 2000) || '데이터 없음';
             await interaction.editReply({ content: text }).catch(() => { });
         }
@@ -828,9 +831,9 @@ async function handleButton(interaction) {
         return;
     }
     // 비상 제어 하위 메뉴 진입 (역할 C)
-    if (customId === 'admin_emergency_menu') {
+    if (key === 'emergency_control') {
         const ctxEm = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
-        if (!PermissionService_1.PermissionService.can(ctxEm, 'admin_emergency_menu')) {
+        if (!PermissionService_1.PermissionService.can(ctxEm, 'emergency_control')) {
             await interaction.reply({ content: '권한 없음 (서버 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
             return;
         }
@@ -876,16 +879,17 @@ async function handleButton(interaction) {
         return;
     }
     // ——— 역할 C: 시스템 업데이트, 프로세스 재기동 (market-bot proxy) ———
-    if (customId === 'admin_git_pull_restart' || customId === 'admin_simple_restart') {
+    if (key === 'system_update' || customId === 'admin_simple_restart') {
         const ctxAdmin = PermissionService_1.PermissionService.from(interaction.user?.id ?? '', interaction.channelId ?? '');
-        if (!PermissionService_1.PermissionService.can(ctxAdmin, customId)) {
+        const permKey = key === 'system_update' ? 'admin_git_pull_restart' : customId;
+        if (!PermissionService_1.PermissionService.can(ctxAdmin, permKey)) {
             await interaction.reply({ content: '권한 없음 (서버 관리자 전용입니다.)', ephemeral: true }).catch(() => { });
             return;
         }
         await interaction.deferReply({ ephemeral: true }).catch(() => { });
-        const path = customId === 'admin_git_pull_restart' ? '/api/admin/git-pull-restart' : '/api/admin/simple-restart';
+        const apiPath = customId === 'admin_simple_restart' ? '/api/admin/simple-restart' : '/api/admin/git-pull-restart';
         try {
-            const result = await api(path, { method: 'POST' });
+            const result = await api(apiPath, { method: 'POST' });
             await interaction.editReply({ content: result?.content ?? '요청 처리됨' }).catch(() => { });
         }
         catch (e) {
@@ -893,27 +897,27 @@ async function handleButton(interaction) {
         }
         return;
     }
-    // FIX: 패널 버튼(현재 상태, 수익률, 헬스, analyst) → ephemeral reply로 결과만 반환, 패널 메시지는 수정 안 함
-    const panelIds = ['current_state', 'current_return', 'health', 'analyst_scan_vol', 'analyst_get_prompt', 'analyst_indicators'];
-    if (panelIds.includes(customId)) {
+    // 패널 버튼(현재 상태, 수익률, 헬스, 분석) → ephemeral reply. 표준 키 기준 (레거시는 normalizeButtonId로 이미 반영)
+    const panelIds = ['current_status', 'current_pnl', 'health_check', 'surge_analysis', 'market_summary', 'key_indicators'];
+    if (panelIds.includes(key)) {
         await interaction.deferReply({ ephemeral: true }).catch(() => { });
         try {
-            if (customId === 'current_state') {
+            if (key === 'current_status') {
                 const data = await api('/api/status');
                 const embed = buildStatusEmbedFromApi(data);
                 await interaction.editReply({ embeds: [embed] }).catch(() => { });
             }
-            else if (customId === 'current_return') {
+            else if (key === 'current_pnl') {
                 const data = await api('/api/pnl');
                 const embed = buildPnlEmbedFromApi(data);
                 await interaction.editReply({ embeds: [embed] }).catch(() => { });
             }
-            else if (customId === 'health') {
+            else if (key === 'health_check') {
                 const report = await api('/api/health');
                 const embed = buildHealthEmbedFromApi(report);
                 await interaction.editReply({ embeds: [embed] }).catch(() => { });
             }
-            else if (customId === 'analyst_scan_vol') {
+            else if (key === 'surge_analysis') {
                 const result = await api('/api/analyst/scan-vol');
                 const embed = new discord_js_1.MessageEmbed()
                     .setTitle('🔍 급등주 분석')
@@ -922,7 +926,7 @@ async function handleButton(interaction) {
                     .setTimestamp();
                 await interaction.editReply({ embeds: [embed] }).catch(() => { });
             }
-            else if (customId === 'analyst_get_prompt') {
+            else if (key === 'market_summary') {
                 const result = await api('/api/analyst/summary');
                 const embed = new discord_js_1.MessageEmbed()
                     .setTitle('💡 시황 요약')
@@ -931,7 +935,7 @@ async function handleButton(interaction) {
                     .setTimestamp();
                 await interaction.editReply({ embeds: [embed] }).catch(() => { });
             }
-            else if (customId === 'analyst_indicators') {
+            else if (key === 'key_indicators') {
                 const result = await api('/api/analyst/indicators');
                 const d = result?.data || {};
                 const lines = [
@@ -1157,10 +1161,10 @@ client.once('ready', async () => {
                 return null;
             });
             if (channel && channel.isText()) {
-                // 1) 먼저 통제 패널(버튼) 복구. 성공 시에만 "복구 완료" 표시.
-                const panelRestored = await restorePanel(channel);
+                // 1) 먼저 통제 패널(버튼) 복구. edit 성공 → "복구 완료", send 성공 → "새 패널 생성", 실패 → "복구 실패"
+                const panelResult = await restoreOrCreateRolePanels(channel);
                 // 2) 그 다음 재기동 안내 메시지 전송 (패널 복구 결과 반영)
-                await sendRestartMessage(channel, panelRestored);
+                await sendRestartMessage(channel, panelResult);
             }
             else {
                 LogUtil_1.LogUtil.logError(LOG_TAG, 'Channel fetch failed or not text channel', { channelId: chId });

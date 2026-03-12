@@ -1,7 +1,7 @@
 import path from 'path';
 require('dotenv').config({ path: path.join(process.cwd(), '.env') });
 
-import { Client, MessageEmbed } from 'discord.js';
+import { Client, MessageEmbed, MessageActionRow, MessageButton } from 'discord.js';
 const discord = require('discord.js') as any;
 const Intents = discord.Intents;
 import { EventBus } from '../../../packages/core/src/EventBus';
@@ -12,6 +12,37 @@ import { ConfirmFlow } from '../../../packages/core/src/ConfirmFlow';
 import { LogUtil } from '../../../packages/core/src/LogUtil';
 import { AppErrorCode } from '../../../packages/shared/src/errors';
 import type { PermissionContext } from '../../../packages/shared/src/types';
+import {
+  validatePanelDefinitions,
+  buildPanelModel,
+  buildPanelContent,
+  buildPanelComponents,
+  buildRolePanelContent,
+  buildRolePanelComponents,
+  getFallbackContent,
+  getFallbackComponents,
+  normalizeButtonId,
+  PANEL_LAYOUT_VERSION,
+  PANEL_CONTENT_VERSION,
+  type PanelModel,
+  type ActionRowPayload,
+  type RoleType,
+} from './panelContract';
+
+/** panelContract의 ActionRowPayload[]를 Discord.js v13 MessageActionRow[]로 변환 (edit/send 시 버튼이 보이도록) */
+function toDiscordComponents(rows: ActionRowPayload[]): MessageActionRow[] {
+  return rows.map((row) => {
+    const actionRow = new MessageActionRow();
+    for (const comp of row.components) {
+      const btn = new MessageButton()
+        .setCustomId(comp.custom_id)
+        .setLabel(comp.label)
+        .setStyle(comp.style as 1 | 2 | 3 | 4 | 5);
+      actionRow.addComponents(btn);
+    }
+    return actionRow;
+  });
+}
 
 const LOG_TAG = 'DISCORD_OP';
 
@@ -28,6 +59,26 @@ function panelRestoreFail(tag: string, err: unknown, extra?: Record<string, unkn
 
 // ===== DISCORD OPERATOR BOOT DIAGNOSTIC (timestamp 항상 포함) =====
 LogUtil.logInfo(LOG_TAG, 'process start', { cwd: process.cwd(), pid: process.pid, node: process.version });
+
+let packageVersion: string | undefined;
+try {
+  const pkg = require(path.join(process.cwd(), 'package.json')) as { version?: string };
+  packageVersion = pkg?.version;
+} catch {
+  packageVersion = process.env.npm_package_version;
+}
+const scriptPath = process.argv[1] ?? 'unknown';
+LogUtil.logWarn(LOG_TAG, '[BOOT][BUILD_INFO]', {
+  pid: process.pid,
+  cwd: process.cwd(),
+  scriptPath,
+  argv: process.argv,
+  nodeVersion: process.version,
+  PANEL_LAYOUT_VERSION,
+  PANEL_CONTENT_VERSION,
+  renderModeDefault: 'single',
+  packageVersion: packageVersion ?? 'unknown',
+});
 
 process.on('uncaughtException', (err) => {
   LogUtil.logError(LOG_TAG, 'uncaughtException', { message: (err as Error).message, stack: (err as Error).stack });
@@ -261,18 +312,6 @@ function scheduleHourlyHealthDm(): void {
 const fs = require('fs') as typeof import('fs');
 const PANEL_FILE = path.join(process.cwd(), 'state', 'discord-panel.json');
 
-import {
-  validatePanelDefinitions,
-  buildPanelModel,
-  buildPanelContent,
-  buildPanelComponents,
-  getFallbackContent,
-  getFallbackComponents,
-  normalizeButtonId,
-  type PanelModel,
-  type ActionRowPayload,
-} from './panelContract';
-
 /** 전략 하위 메뉴: SAFE / A-보수적 / A-균형형 / A-적극형 (strategy_menu 클릭 시에만 표시) */
 function buildStrategySubmenuComponents(): any[] {
   return [
@@ -302,167 +341,130 @@ function buildEmergencySubmenuComponents(): any[] {
   ];
 }
 
+/** 역할별 패널 state (역할별 메시지 ID 3개) */
+export interface PanelState {
+  channelId?: string;
+  roleAMessageId?: string;
+  roleBMessageId?: string;
+  roleCMessageId?: string;
+  updatedAt?: string;
+}
+
 export interface PanelRestoreResult {
   restored: boolean;
   mode?: 'edit' | 'new';
-  statusText: '복구 완료' | '새 패널 생성' | '복구 실패 (로그 확인)';
+  statusText: string;
   durationMs?: number;
+  roleA?: 'edit' | 'new';
+  roleB?: 'edit' | 'new';
+  roleC?: 'edit' | 'new';
 }
 
-/** 패널 복구/생성: 고정 규약 모델 → content + components. 타이밍 세분화·fallback·상태 명시. */
-async function restoreOrCreatePanelMessage(channel: any): Promise<PanelRestoreResult> {
+/** 역할별 패널 3개 복구/생성: A → B → C 순서로 메시지 각각 fetch/edit 또는 send. */
+async function restoreOrCreateRolePanels(channel: any): Promise<PanelRestoreResult> {
   const t0 = Date.now();
   const lastUpdatedAt = new Date().toISOString();
+  const dir = path.join(process.cwd(), 'state');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
-  const tState = Date.now();
-  let panelData: { channelId?: string; panelMessageId?: string; updatedAt?: string } = {};
+  let state: PanelState = {};
   try {
     if (fs.existsSync(PANEL_FILE)) {
       const raw = fs.readFileSync(PANEL_FILE, 'utf8');
-      panelData = JSON.parse(raw);
-      panelRestoreWarn('STATE_LOADED', {
-        found: true,
-        channelId: panelData.channelId,
-        messageId: panelData.panelMessageId,
-      });
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      state = {
+        channelId: typeof parsed.channelId === 'string' ? parsed.channelId : undefined,
+        roleAMessageId: typeof parsed.roleAMessageId === 'string' ? parsed.roleAMessageId : undefined,
+        roleBMessageId: typeof parsed.roleBMessageId === 'string' ? parsed.roleBMessageId : undefined,
+        roleCMessageId: typeof parsed.roleCMessageId === 'string' ? parsed.roleCMessageId : undefined,
+        updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : undefined,
+      };
+      panelRestoreWarn('STATE_LOADED', { channelId: state.channelId, roleA: state.roleAMessageId, roleB: state.roleBMessageId, roleC: state.roleCMessageId });
     } else {
       panelRestoreWarn('STATE_LOADED', { found: false, reason: 'no state file' });
     }
   } catch (e) {
     panelRestoreFail('STATE_LOAD_FAIL', e, { panelFile: PANEL_FILE });
   }
-  const stateLoadMs = Date.now() - tState;
-  panelRestoreWarn('TIMING', { stateLoadMs });
 
-  const tModel = Date.now();
-  let panelStatus: PanelModel['panelStatus'] = '';
-  const model = buildPanelModel({ lastUpdatedAt, panelStatus });
-  const modelBuildMs = Date.now() - tModel;
+  const channelIdMatch = state.channelId && String(state.channelId) === String(channel.id);
+  const forceNewPanel = process.env.FORCE_NEW_PANEL_ON_RESTART === 'true';
+  const roles: RoleType[] = ['A', 'B', 'C'];
+  const result: { roleA?: 'edit' | 'new'; roleB?: 'edit' | 'new'; roleC?: 'edit' | 'new' } = {};
+  const messageIdKeys: (keyof PanelState)[] = ['roleAMessageId', 'roleBMessageId', 'roleCMessageId'];
 
-  let panelContent: string;
-  let components: ActionRowPayload[];
-  const tContent = Date.now();
-  try {
-    panelContent = buildPanelContent(model, { renderMode: 'single' });
-  } catch (e) {
-    panelRestoreFail('CONTENT_BUILD_FAIL', e, {});
-    panelContent = getFallbackContent();
-    panelStatus = 'fallback';
-  }
-  const contentBuildMs = Date.now() - tContent;
+  for (let i = 0; i < roles.length; i++) {
+    const role = roles[i];
+    const messageIdKey = messageIdKeys[i];
+    let savedId: string | undefined = state[messageIdKey];
+    if (forceNewPanel || !channelIdMatch) savedId = undefined;
 
-  const tComp = Date.now();
-  try {
-    const m = buildPanelModel({ lastUpdatedAt, panelStatus: panelStatus || undefined });
-    components = buildPanelComponents(m, { renderMode: 'single' });
-  } catch (e) {
-    panelRestoreFail('COMPONENTS_BUILD_FAIL', e, { willUseFallback: true });
-    components = getFallbackComponents();
-    if (!panelStatus) panelStatus = 'fallback';
-  }
-  const componentsBuildMs = Date.now() - tComp;
+    const content = buildRolePanelContent(role, { lastUpdatedAt });
+    const components = buildRolePanelComponents(role);
+    const discordComponents = toDiscordComponents(components);
 
-  const rows = components.length;
-  const counts = components.map((r) => r.components?.length ?? 0);
-  const countsStr = counts.join(',');
-  panelRestoreWarn('PANEL_LAYOUT', { rows, counts: countsStr });
-
-  const dir = path.join(process.cwd(), 'state');
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
-  const channelIdMatch = panelData.channelId && String(panelData.channelId) === String(channel.id);
-  let hasSavedMessage = !!(panelData.panelMessageId && channelIdMatch);
-  if (panelData.panelMessageId && !channelIdMatch) {
-    panelRestoreWarn('CHANNEL_MISMATCH', { savedChannelId: panelData.channelId, currentChannelId: channel.id, willSendNew: true });
-    hasSavedMessage = false;
-  }
-
-  const finalModel = buildPanelModel({
-    lastUpdatedAt,
-    panelStatus: panelStatus || (hasSavedMessage ? '복구 완료' : '새 패널 생성'),
-  });
-  const finalContent = buildPanelContent(finalModel, { renderMode: 'single' });
-
-  if (hasSavedMessage) {
-    const messageId = panelData.panelMessageId!;
-    panelRestoreWarn('FETCH_EXISTING', { channelId: channel.id, messageId });
-    const tFetch = Date.now();
-    let msg: any = null;
-    let fetchMs = 0;
-    try {
-      msg = await channel.messages.fetch(messageId);
-      fetchMs = Date.now() - tFetch;
-      panelRestoreWarn('FETCH_EXISTING_OK', { messageId, fetchMs });
-    } catch (e) {
-      fetchMs = Date.now() - tFetch;
-      panelRestoreFail('FETCH_EXISTING_FAIL', e as Error, { messageId, fetchMs });
-      panelRestoreWarn('MESSAGE_DELETED_OR_INACCESSIBLE', { messageId, willSendNew: true });
-      hasSavedMessage = false;
-    }
-    if (msg) {
+    let finalId: string;
+    if (savedId) {
       try {
-        panelRestoreWarn('EDIT_START', { messageId: msg.id, contentLen: finalContent.length, rows });
-        const tEdit = Date.now();
-        await msg.edit({ content: finalContent, components });
-        const editMs = Date.now() - tEdit;
-        panelRestoreWarn('EDIT_OK', { messageId: msg.id, editMs });
-        try {
-          fs.writeFileSync(PANEL_FILE, JSON.stringify({ channelId: channel.id, panelMessageId: msg.id, updatedAt: lastUpdatedAt }));
-          panelRestoreWarn('STATE_SAVE_OK', { channelId: channel.id, messageId: msg.id });
-        } catch (saveErr) {
-          panelRestoreFail('STATE_SAVE_FAIL', saveErr as Error, { after: 'edit', channelId: channel.id, messageId: msg.id });
-        }
-        const totalRestoreMs = Date.now() - t0;
-        panelRestoreWarn('PANEL_RESTORE_DONE', {
-          restored: true,
-          mode: 'edit',
-          panelMessageId: msg.id,
-          stateLoadMs,
-          modelBuildMs,
-          contentBuildMs,
-          componentsBuildMs,
-          fetchMs,
-          editMs,
-          totalRestoreMs,
-        });
-        return { restored: true, mode: 'edit', statusText: '복구 완료', durationMs: totalRestoreMs };
+        const msg = await channel.messages.fetch(savedId);
+        await msg.edit({ content, components: discordComponents });
+        finalId = msg.id;
+        if (role === 'A') result.roleA = 'edit';
+        else if (role === 'B') result.roleB = 'edit';
+        else result.roleC = 'edit';
+        panelRestoreWarn('ROLE_PANEL_EDIT', { role, messageId: finalId });
       } catch (e) {
-        panelRestoreFail('EDIT_FAIL', e, { messageId: msg.id, contentLen: finalContent.length, rows });
+        panelRestoreWarn('ROLE_PANEL_FETCH_FAIL', { role, messageId: savedId, willSendNew: true });
+        const sent = await channel.send({ content, components: discordComponents });
+        finalId = sent.id;
+        if (role === 'A') result.roleA = 'new';
+        else if (role === 'B') result.roleB = 'new';
+        else result.roleC = 'new';
+        panelRestoreWarn('ROLE_PANEL_SEND', { role, messageId: finalId });
       }
+    } else {
+      const sent = await channel.send({ content, components: discordComponents });
+      finalId = sent.id;
+      if (role === 'A') result.roleA = 'new';
+      else if (role === 'B') result.roleB = 'new';
+      else result.roleC = 'new';
+      panelRestoreWarn('ROLE_PANEL_SEND', { role, messageId: finalId });
     }
+    state[messageIdKey] = finalId;
   }
 
-  panelRestoreWarn('SEND_NEW_START', { channelId: channel.id, contentLen: finalContent.length, rows });
-  const tSend = Date.now();
+  state.channelId = channel.id;
+  state.updatedAt = lastUpdatedAt;
   try {
-    const sent = await channel.send({ content: finalContent, components });
-    const sendMs = Date.now() - tSend;
-    panelRestoreWarn('SEND_NEW_OK', { messageId: sent.id });
-    try {
-      fs.writeFileSync(PANEL_FILE, JSON.stringify({ channelId: channel.id, panelMessageId: sent.id, updatedAt: lastUpdatedAt }));
-      panelRestoreWarn('STATE_SAVE_OK', { channelId: channel.id, messageId: sent.id });
-    } catch (saveErr) {
-      panelRestoreFail('STATE_SAVE_FAIL', saveErr as Error, { after: 'send', channelId: channel.id, messageId: sent.id });
-    }
-    const totalRestoreMs = Date.now() - t0;
-    panelRestoreWarn('PANEL_RESTORE_DONE', {
-      restored: true,
-      mode: 'new',
-      panelMessageId: sent.id,
-      sendMs,
-      totalRestoreMs,
-    });
-    return { restored: true, mode: 'new', statusText: '새 패널 생성', durationMs: totalRestoreMs };
-  } catch (e) {
-    panelRestoreFail('SEND_NEW_FAIL', e, { channelId: channel.id, contentLen: finalContent.length, rows });
-    const totalRestoreMs = Date.now() - t0;
-    panelRestoreWarn('PANEL_RESTORE_DONE', { restored: false, reason: 'send_failed', totalRestoreMs });
-    return { restored: false, statusText: '복구 실패 (로그 확인)', durationMs: totalRestoreMs };
+    fs.writeFileSync(PANEL_FILE, JSON.stringify(state));
+    panelRestoreWarn('STATE_SAVE_OK', { channelId: channel.id, roleA: state.roleAMessageId, roleB: state.roleBMessageId, roleC: state.roleCMessageId });
+  } catch (saveErr) {
+    panelRestoreFail('STATE_SAVE_FAIL', saveErr as Error, { channelId: channel.id });
   }
+
+  const totalRestoreMs = Date.now() - t0;
+  const allEdit = result.roleA === 'edit' && result.roleB === 'edit' && result.roleC === 'edit';
+  const anyNew = result.roleA === 'new' || result.roleB === 'new' || result.roleC === 'new';
+  const statusText = allEdit ? '역할별 패널 3건 복구 완료' : anyNew ? '역할별 패널 일부 신규 생성' : '역할별 패널 복구 완료';
+  panelRestoreWarn('PANEL_RESTORE_DONE', { restored: true, roleA: result.roleA, roleB: result.roleB, roleC: result.roleC, totalRestoreMs });
+  return {
+    restored: true,
+    statusText,
+    durationMs: totalRestoreMs,
+    roleA: result.roleA,
+    roleB: result.roleB,
+    roleC: result.roleC,
+  };
 }
 
 /** 재기동 안내 메시지. result.statusText·durationMs 반영 */
 async function sendRestartMessage(channel: any, result: PanelRestoreResult): Promise<void> {
+  const policy = 'always send';
+  panelRestoreWarn('RESTART_MESSAGE_POLICY', {
+    policy,
+    startupMessageSentAlready: startupMessageSent,
+    willSend: !startupMessageSent,
+  });
   if (startupMessageSent) return;
   const statusText = result.statusText;
   panelRestoreWarn('RESTART_MESSAGE', { panelRestored: result.restored, mode: result.mode, statusText, durationMs: result.durationMs });
@@ -480,9 +482,11 @@ async function sendRestartMessage(channel: any, result: PanelRestoreResult): Pro
     const restartMsg = await channel.send({ content: text });
     startupMessageSent = true;
     panelRestoreWarn('RESTART_MESSAGE_SENT', { restartMessageId: restartMsg?.id ?? null, panelRestored: result.restored, statusText });
+    panelRestoreWarn('RESTART_MESSAGE_POLICY', { policy, restartMessageSend: true, restartMessageId: restartMsg?.id ?? null });
   } catch (e) {
     panelRestoreFail('RESTART_MESSAGE_FAIL', e as Error, { panelRestored: result.restored });
     LogUtil.logError(LOG_TAG, 'Restart message send failed', { message: (e as Error).message });
+    panelRestoreWarn('RESTART_MESSAGE_POLICY', { policy, restartMessageSend: false, error: (e as Error).message });
   }
 }
 
@@ -1206,7 +1210,7 @@ client.once('ready', async () => {
       });
       if (channel && channel.isText()) {
         // 1) 먼저 통제 패널(버튼) 복구. edit 성공 → "복구 완료", send 성공 → "새 패널 생성", 실패 → "복구 실패"
-        const panelResult = await restoreOrCreatePanelMessage(channel);
+        const panelResult = await restoreOrCreateRolePanels(channel);
         // 2) 그 다음 재기동 안내 메시지 전송 (패널 복구 결과 반영)
         await sendRestartMessage(channel, panelResult);
       } else {

@@ -10,6 +10,27 @@
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
+function marketSearchLog(tag, detail) {
+  const msg = typeof detail === 'object' ? JSON.stringify(detail) : String(detail);
+  console.warn(`[MARKET_SEARCH][${tag}] ${msg}`);
+}
+
+// [MARKET_SEARCH][PROCESS_ERROR] — process-level 예외 (가장 먼저 등록)
+process.on('unhandledRejection', (reason, promise) => {
+  marketSearchLog('PROCESS_ERROR', { type: 'unhandledRejection', reason: String(reason) });
+});
+process.on('uncaughtException', (err) => {
+  marketSearchLog('PROCESS_ERROR', {
+    type: 'uncaughtException',
+    name: err?.name,
+    message: err?.message,
+    stack: err?.stack ? err.stack.split('\n').slice(0, 4).join(' | ') : undefined,
+  });
+});
+process.on('warning', (warn) => {
+  marketSearchLog('PROCESS_ERROR', { type: 'warning', name: warn?.name, message: warn?.message });
+});
+
 const ADMIN_ID_BACKUP = '1435995084754649260';
 const effectiveAdminId = process.env.ADMIN_ID || ADMIN_ID_BACKUP;
 console.log('[Check] ADMIN_ID loaded:', effectiveAdminId ? 'Yes' : 'No');
@@ -20,6 +41,17 @@ const token =
 if (process.env.DISCORD_TOKEN && !token) {
   console.warn('[MarketSearchEngine] DISCORD_TOKEN은 매매 봇용입니다. 시황 봇에는 MARKET_BOT_TOKEN을 .env에 넣으세요.');
 }
+
+// [MARKET_SEARCH][BOOT]
+marketSearchLog('BOOT', {
+  pid: process.pid,
+  cwd: process.cwd(),
+  __filename: __filename,
+  nodeVersion: process.version,
+  argv: process.argv,
+  hasDiscordToken: !!token,
+  tokenPrefix: token ? token.slice(0, 8) + '...' : '',
+});
 
 console.log('[Analyst] Attempting to login with Token length:', process.env.MARKET_BOT_TOKEN?.length ?? 'N/A');
 console.log('[Analyst] Using token length:', token?.length ?? 0);
@@ -111,6 +143,11 @@ function buildAnalystRow() {
 const ONE_HOUR_MS = 60 * 60 * 1000;
 
 client.once(ClientReadyEvent, async () => {
+  marketSearchLog('READY', {
+    botUserId: client.user?.id ?? null,
+    botTag: client.user?.tag ?? null,
+    guildCount: client.guilds?.cache?.size ?? 0,
+  });
   console.log('[MarketSearchEngine] 서비스 가동 완료');
   const channelId =
     process.env.MARKET_SEARCH_ENGINE_CHANNEL_ID ||
@@ -225,10 +262,17 @@ client.on(InteractionCreateEvent, async (interaction) => {
   }
 });
 
+marketSearchLog('DISCORD_LOGIN][START', {});
 console.log('[MarketSearchEngine] 시작 중 (MARKET_BOT_TOKEN 사용)…');
 client.login(token).then(() => {
+  marketSearchLog('DISCORD_LOGIN][SUCCESS', {});
   console.log('[MarketSearchEngine] 로그인 요청 완료. 온라인 시 "[MarketSearchEngine] 온라인" 로그 확인.');
 }).catch((e) => {
+  marketSearchLog('DISCORD_LOGIN][FAIL', {
+    errorName: e?.name,
+    errorMessage: e?.message,
+    stack: e?.stack ? e.stack.split('\n').slice(0, 4).join(' | ') : undefined,
+  });
   console.error('[MarketSearchEngine] 로그인 실패:', e?.message);
   process.exit(1);
 });
