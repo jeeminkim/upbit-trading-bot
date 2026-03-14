@@ -29,7 +29,7 @@ import {
   type RoleType,
 } from './panelContract';
 
-/** panelContract의 ActionRowPayload[]를 Discord.js v13 MessageActionRow[]로 변환 (edit/send 시 버튼이 보이도록) */
+/** panelContract의 ActionRowPayload[]를 Discord.js v13 MessageActionRow[]로 변환 (레거시 경로용) */
 function toDiscordComponents(rows: ActionRowPayload[]): MessageActionRow[] {
   return rows.map((row) => {
     const actionRow = new MessageActionRow();
@@ -42,6 +42,44 @@ function toDiscordComponents(rows: ActionRowPayload[]): MessageActionRow[] {
     }
     return actionRow;
   });
+}
+
+/**
+ * Discord API에 보낼 컴포넌트는 type/style이 숫자여야 클라이언트에 버튼이 표시됨.
+ * panelContract의 ActionRowPayload는 이미 API 형식(type: 1, type: 2, style: number)이므로 그대로 사용.
+ */
+function sendRolePanelMessageWithRawPayload(
+  channel: any,
+  content: string,
+  rawComponents: ActionRowPayload[],
+  role: string,
+  messageId?: string,
+): Promise<{ id: string }> {
+  const client = channel?.client;
+  if (!client?.api) {
+    return Promise.reject(new Error('channel.client.api not available'));
+  }
+  const data: { content: string; components: ActionRowPayload[] } = { content, components: rawComponents };
+  panelRestoreWarn('ROLE_PANEL_RAW_API_PAYLOAD', {
+    role,
+    contentLen: content.length,
+    componentRowCount: rawComponents.length,
+    firstRowButtonCount: rawComponents[0]?.components?.length ?? 0,
+    firstButton: rawComponents[0]?.components?.[0]
+      ? { type: rawComponents[0].components[0].type, style: rawComponents[0].components[0].style, custom_id: rawComponents[0].components[0].custom_id, label: rawComponents[0].components[0].label }
+      : null,
+  });
+  if (messageId) {
+    return client.api
+      .channels(channel.id)
+      .messages(messageId)
+      .patch({ data })
+      .then((d: any) => ({ id: d.id }));
+  }
+  return client.api
+    .channels(channel.id)
+    .messages.post({ data })
+    .then((d: any) => ({ id: d.id }));
 }
 
 const LOG_TAG = 'DISCORD_OP';
@@ -115,7 +153,9 @@ const adminId = (process.env.ADMIN_ID || process.env.DISCORD_ADMIN_ID || '').tri
 
 // 고정 패널 규약 검증 — 앱 시작 시 1회. 오류 시 경고 후 fallback 레이아웃 사용
 validatePanelDefinitions();
-const DASHBOARD_URL = (process.env.DASHBOARD_URL || process.env.API_URL || 'http://localhost:3000').replace(/\/$/, '');
+const API_SERVER_URL = (process.env.API_SERVER_URL || process.env.DASHBOARD_URL || process.env.API_URL || 'http://localhost:3100').replace(/\/$/, '');
+
+LogUtil.logInfo(LOG_TAG, 'api server url configured', { API_SERVER_URL });
 
 LogUtil.logInfo(LOG_TAG, 'creating client');
 const client = new Client({ intents: [(Intents as any)?.FLAGS?.GUILDS ?? 1] });
@@ -125,20 +165,59 @@ client.on('error', (err: any) => {
 
 let startupMessageSent = false;
 
+/** 연결 실패 시 사용자에게 보여줄 안내 문구 (로그에는 상세 메시지 유지) */
+const API_CONNECTION_HINT =
+  'api-server에 연결할 수 없습니다. pm2에서 api-server 실행 여부와 .env/ecosystem의 API_SERVER_URL(기본 http://localhost:3100)을 확인한 뒤 재시도하세요.';
+
 async function api<T>(path: string, opts?: { method?: string; body?: any; userId?: string }): Promise<T> {
-  const url = `${DASHBOARD_URL}${path.startsWith('/') ? path : '/' + path}`;
+  const url = `${API_SERVER_URL}${path.startsWith('/') ? path : '/' + path}`;
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (opts?.userId) headers['x-user-id'] = opts.userId;
-  const res = await fetch(url, {
-    method: opts?.method || 'GET',
-    headers,
-    body: opts?.body ? JSON.stringify(opts.body) : undefined,
-  });
-  if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
-  return res.json() as Promise<T>;
+  try {
+    const res = await fetch(url, {
+      method: opts?.method || 'GET',
+      headers,
+      body: opts?.body ? JSON.stringify(opts.body) : undefined,
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => res.statusText);
+      LogUtil.logWarn(LOG_TAG, 'api non-OK response', { path, url, status: res.status, bodyPreview: body?.slice(0, 200) });
+      const bodyStr = body || res.statusText || '';
+      const is503Backend =
+        res.status === 503 && /fetch failed|unavailable|market-bot|discordHandlers not ready|fetchAssets not available|server not ready/i.test(bodyStr);
+      const is500ProxyBackend =
+        res.status === 500 &&
+        /fetchAssets|discordHandlers not ready|not a function|server not loaded|server not ready/i.test(bodyStr);
+      if (is503Backend || is500ProxyBackend) {
+        throw new Error(
+          '하위 서비스(market-bot)가 아직 준비 중이거나 일시 오류입니다. 1~2분 후 다시 시도하세요. pm2에서 market-bot 실행 여부를 확인하세요. (상세: ' + bodyStr.slice(0, 120) + ')',
+        );
+      }
+      throw new Error(bodyStr || res.statusText);
+    }
+    return res.json() as Promise<T>;
+  } catch (e) {
+    const err = e as Error & { cause?: { code?: string } };
+    const msg = err.message || String(e);
+    const code = err.cause?.code;
+    LogUtil.logError(LOG_TAG, 'api request failed', {
+      path,
+      url,
+      message: msg,
+      code: code ?? undefined,
+    });
+    // API 연결 실패(ECONNREFUSED, fetch 실패 등)일 때만 api-server 안내. proxy/backend 오류(예: fetchAssets not available)는 그대로 전달.
+    const isConnectionError =
+      /ECONNREFUSED|ENOTFOUND|Failed to fetch|network error|ETIMEDOUT/i.test(msg) ||
+      (/fetch/i.test(msg) && !/fetchAssets|discordHandlers|server not ready|market-bot/i.test(msg));
+    if (isConnectionError) {
+      throw new Error(API_CONNECTION_HINT + ' (상세: ' + msg.slice(0, 120) + ')');
+    }
+    throw e;
+  }
 }
 
-/** services: /api/services-status 응답. 있으면 임베드 상단에 서비스 상태 한 줄 추가. details.reason 있으면 🔴인 항목에만 괄호로 표시. */
+/** services: /api/services-status 응답. 있으면 임베드 상단에 서비스 상태 한 줄 추가. details.reason 있으면 🔴인 항목에만 괄호로 표시. reasonCode/lastOkAt/lastOkAgeSec는 응답에 포함되나 표시는 reason만 사용. */
 function buildStatusEmbedFromApi(
   data: {
     assets: any;
@@ -151,9 +230,9 @@ function buildStatusEmbedFromApi(
     marketBot?: boolean;
     engineRunning?: boolean;
     details?: {
-      apiServer?: { reason?: string | null };
-      marketBot?: { reason?: string | null };
-      engine?: { reason?: string | null };
+      apiServer?: { reason?: string | null; reasonCode?: string; lastOkAt?: number | null; lastOkAgeSec?: number | null };
+      marketBot?: { reason?: string | null; reasonCode?: string; lastOkAt?: number | null; lastOkAgeSec?: number | null };
+      engine?: { reason?: string | null; reasonCode?: string; lastOkAt?: number | null; lastOkAgeSec?: number | null };
     };
   } | null
 ): MessageEmbed {
@@ -178,15 +257,29 @@ function buildStatusEmbedFromApi(
   ].join('\n');
 
   const details = services?.details;
-  const fmt = (ok: boolean, reason: string | null | undefined) =>
-    ok ? '🟢' : '🔴' + (reason ? ' (' + reason + ')' : '');
+  /** age 초 단위 → "42s" / "3m" / "2h". 없으면 빈 문자열 */
+  const formatAge = (sec: number | null | undefined): string => {
+    if (sec == null || sec < 0) return '';
+    if (sec < 60) return sec + 's';
+    if (sec < 3600) return Math.floor(sec / 60) + 'm';
+    return Math.floor(sec / 3600) + 'h';
+  };
+  /** 🔴일 때만 reason + lastOkAgeSec(있으면) 표시 */
+  const fmt = (ok: boolean, reason: string | null | undefined, lastOkAgeSec?: number | null) => {
+    if (ok) return '🟢';
+    let s = '🔴';
+    if (reason) s += ' ' + reason;
+    const ageStr = formatAge(lastOkAgeSec);
+    if (ageStr) s += ' (last ok ' + ageStr + ')';
+    return s;
+  };
 
   const fields: { name: string; value: string; inline?: boolean }[] = [];
   if (services != null) {
-    const a = fmt(!!services.apiServer, details?.apiServer?.reason ?? null);
+    const a = fmt(!!services.apiServer, details?.apiServer?.reason ?? null, details?.apiServer?.lastOkAgeSec ?? null);
     const d = '🟢'; // Discord에서 호출 시 discord-operator는 가동 중
-    const m = fmt(!!services.marketBot, details?.marketBot?.reason ?? null);
-    const e = fmt(!!services.engineRunning, details?.engine?.reason ?? null);
+    const m = fmt(!!services.marketBot, details?.marketBot?.reason ?? null, details?.marketBot?.lastOkAgeSec ?? null);
+    const e = fmt(!!services.engineRunning, details?.engine?.reason ?? null, details?.engine?.lastOkAgeSec ?? null);
     fields.push({ name: '서비스 상태', value: `api-server ${a} · discord-op ${d} · market-bot ${m} · engine ${e}`, inline: false });
   }
   fields.push(
@@ -389,6 +482,10 @@ export interface PanelRestoreResult {
   roleA?: 'edit' | 'new';
   roleB?: 'edit' | 'new';
   roleC?: 'edit' | 'new';
+  /** 버튼이 붙어 있는 패널 메시지 ID (Discord에서 이 메시지들 위로 스크롤하면 버튼 보임) */
+  roleAMessageId?: string;
+  roleBMessageId?: string;
+  roleCMessageId?: string;
 }
 
 /** 역할별 패널 3개 복구/생성: A → B → C 순서로 메시지 각각 fetch/edit 또는 send. */
@@ -431,37 +528,82 @@ async function restoreOrCreateRolePanels(channel: any): Promise<PanelRestoreResu
     if (forceNewPanel || !channelIdMatch) savedId = undefined;
 
     const content = buildRolePanelContent(role, { lastUpdatedAt });
-    const components = buildRolePanelComponents(role);
-    const discordComponents = toDiscordComponents(components);
+    let components = buildRolePanelComponents(role);
+    if (components.length === 0) {
+      panelRestoreWarn('ROLE_PANEL_COMPONENTS_EMPTY', { role, usingFallback: true });
+      components = getFallbackComponents();
+    }
+    const counts = components.map((r) => r.components.length);
+    const customIdsByRow = components.map((r) => r.components.map((c) => c.custom_id));
+    panelRestoreWarn('ROLE_PANEL_COMPONENTS', {
+      role,
+      rows: components.length,
+      counts,
+      customIdsByRow,
+    });
 
+    panelRestoreWarn('ROLE_PANEL_PAYLOAD', {
+      role,
+      contentLen: content.length,
+      componentRowCount: components.length,
+      rawTypes: components.map((r) => ({ rowType: r.type, buttonStyles: r.components.map((c) => c.style) })),
+    });
+
+    // Discord 클라이언트는 "편집으로 추가한" 컴포넌트를 렌더하지 않는 경우가 있음.
+    // 버튼이 보이도록 항상 새 메시지로 전송하고, 기존 패널 메시지는 삭제.
     let finalId: string;
-    if (savedId) {
+    const sent = await sendRolePanelMessageWithRawPayload(channel, content, components, role);
+    finalId = sent.id;
+    if (role === 'A') result.roleA = 'new';
+    else if (role === 'B') result.roleB = 'new';
+    else result.roleC = 'new';
+    panelRestoreWarn('ROLE_PANEL_SEND', { role, messageId: finalId });
+    if (savedId && savedId !== finalId) {
       try {
-        const msg = await channel.messages.fetch(savedId);
-        await msg.edit({ content, components: discordComponents });
-        finalId = msg.id;
-        if (role === 'A') result.roleA = 'edit';
-        else if (role === 'B') result.roleB = 'edit';
-        else result.roleC = 'edit';
-        panelRestoreWarn('ROLE_PANEL_EDIT', { role, messageId: finalId });
-      } catch (e) {
-        panelRestoreWarn('ROLE_PANEL_FETCH_FAIL', { role, messageId: savedId, willSendNew: true });
-        const sent = await channel.send({ content, components: discordComponents });
+        await channel.messages.delete(savedId);
+        panelRestoreWarn('ROLE_PANEL_OLD_DELETED', { role, oldMessageId: savedId });
+      } catch (_) {
+        panelRestoreWarn('ROLE_PANEL_OLD_DELETE_SKIP', { role, oldMessageId: savedId });
+      }
+    }
+
+    try {
+      const verifyMsg = await channel.messages.fetch(finalId);
+      const verifyRows = verifyMsg.components?.length ?? 0;
+      const verifyCounts = (verifyMsg.components ?? []).map((ar: any) => ar.components?.length ?? 0);
+      const firstCustomIds = (verifyMsg.components ?? [])
+        .slice(0, 2)
+        .flatMap((ar: any) => (ar.components ?? []).map((c: any) => c.customId ?? c.custom_id).filter(Boolean));
+      const verifyShape = (verifyMsg.components ?? []).map((ar: any) => ({
+        type: ar.type,
+        componentCount: ar.components?.length ?? 0,
+        customIds: (ar.components ?? []).map((c: any) => c.customId ?? c.custom_id).filter(Boolean),
+      }));
+      panelRestoreWarn('ROLE_PANEL_VERIFY', {
+        role,
+        messageId: finalId,
+        componentRowCount: verifyRows,
+        componentCounts: verifyCounts,
+        firstCustomIds: firstCustomIds.slice(0, 5),
+        verifyShape,
+      });
+
+      if (verifyRows === 0) {
+        panelRestoreWarn('ROLE_PANEL_VERIFY_FAIL', { role, messageId: finalId, willSendNew: true });
+        const sent = await sendRolePanelMessageWithRawPayload(channel, content, components, role);
         finalId = sent.id;
+        state[messageIdKey] = finalId;
         if (role === 'A') result.roleA = 'new';
         else if (role === 'B') result.roleB = 'new';
         else result.roleC = 'new';
-        panelRestoreWarn('ROLE_PANEL_SEND', { role, messageId: finalId });
+        panelRestoreWarn('ROLE_PANEL_SEND_AFTER_VERIFY_FAIL', { role, messageId: finalId });
+      } else {
+        state[messageIdKey] = finalId;
       }
-    } else {
-      const sent = await channel.send({ content, components: discordComponents });
-      finalId = sent.id;
-      if (role === 'A') result.roleA = 'new';
-      else if (role === 'B') result.roleB = 'new';
-      else result.roleC = 'new';
-      panelRestoreWarn('ROLE_PANEL_SEND', { role, messageId: finalId });
+    } catch (verifyErr) {
+      state[messageIdKey] = finalId;
+      panelRestoreWarn('ROLE_PANEL_VERIFY_FETCH_ERR', { role, messageId: finalId, err: (verifyErr as Error).message });
     }
-    state[messageIdKey] = finalId;
   }
 
   state.channelId = channel.id;
@@ -478,6 +620,12 @@ async function restoreOrCreateRolePanels(channel: any): Promise<PanelRestoreResu
   const anyNew = result.roleA === 'new' || result.roleB === 'new' || result.roleC === 'new';
   const statusText = allEdit ? '역할별 패널 3건 복구 완료' : anyNew ? '역할별 패널 일부 신규 생성' : '역할별 패널 복구 완료';
   panelRestoreWarn('PANEL_RESTORE_DONE', { restored: true, roleA: result.roleA, roleB: result.roleB, roleC: result.roleC, totalRestoreMs });
+  panelRestoreWarn('PANEL_BUTTON_MESSAGE_IDS', {
+    hint: '버튼은 이 메시지 ID들(채널에서 위로 스크롤)에 있습니다. 맨 아래 재기동 메시지에는 버튼 없음.',
+    roleAMessageId: state.roleAMessageId,
+    roleBMessageId: state.roleBMessageId,
+    roleCMessageId: state.roleCMessageId,
+  });
   return {
     restored: true,
     statusText,
@@ -485,6 +633,9 @@ async function restoreOrCreateRolePanels(channel: any): Promise<PanelRestoreResu
     roleA: result.roleA,
     roleB: result.roleB,
     roleC: result.roleC,
+    roleAMessageId: state.roleAMessageId,
+    roleBMessageId: state.roleBMessageId,
+    roleCMessageId: state.roleCMessageId,
   };
 }
 
@@ -501,6 +652,10 @@ async function sendRestartMessage(channel: any, result: PanelRestoreResult): Pro
   panelRestoreWarn('RESTART_MESSAGE', { panelRestored: result.restored, mode: result.mode, statusText, durationMs: result.durationMs });
   try {
     const durationLine = result.durationMs != null ? `\n패널 복구 소요: ${result.durationMs} ms` : '';
+    const buttonHint =
+      result.roleAMessageId || result.roleBMessageId || result.roleCMessageId
+        ? '\n\n※ **버튼**은 이 메시지 **위**에 있는 역할 A/B/C 패널 3개 메시지에 있습니다. 위로 스크롤해 주세요.'
+        : '';
     const text = [
       '🚀 **시스템 재기동 되었습니다**',
       '',
@@ -508,7 +663,7 @@ async function sendRestartMessage(channel: any, result: PanelRestoreResult): Pro
       'Market Bot       : 연결 확인',
       'API Server       : 정상',
       '',
-      `패널 상태 : ${statusText}${durationLine}`,
+      `패널 상태 : ${statusText}${durationLine}${buttonHint}`,
     ].join('\n');
     const restartMsg = await channel.send({ content: text });
     startupMessageSent = true;
@@ -620,6 +775,7 @@ async function handleButton(interaction: any): Promise<void> {
       await AuditLogService.log({ userId, command: 'engine_start', timestamp: new Date().toISOString(), success: !!result?.success });
       await interaction.editReply({ content: result?.message ?? '엔진 가동 요청됨' }).catch(() => {});
     } catch (e) {
+      LogUtil.logWarn(LOG_TAG, 'panel button failed', { key: 'engine_start', message: (e as Error).message });
       await interaction.editReply({ content: `오류: ${(e as Error).message}` }).catch(() => {});
     }
     return;
@@ -701,6 +857,7 @@ async function handleButton(interaction: any): Promise<void> {
         await interaction.editReply({ content: `오류: ${result?.error ?? 'Unknown'}` }).catch(() => {});
       }
     } catch (e) {
+      LogUtil.logWarn(LOG_TAG, 'panel button failed', { key: customId, message: (e as Error).message });
       await interaction.editReply({ content: `오류: ${(e as Error).message}` }).catch(() => {});
     }
     return;
@@ -714,6 +871,7 @@ async function handleButton(interaction: any): Promise<void> {
       const line = `**현재 전략 모드: ${data.mode ?? '—'}**\n- threshold_entry: ${data.thresholdEntry ?? '—'}\n- min_orchestrator_score: ${data.minOrchestratorScore ?? '—'}\n- updated_by: ${data.updatedBy ?? '—'}\n- updated_at: ${at}\n- description: ${desc}`;
       await interaction.editReply({ content: line }).catch(() => {});
     } catch (e) {
+      LogUtil.logWarn(LOG_TAG, 'panel button failed', { key: 'current_strategy', message: (e as Error).message });
       await interaction.editReply({ content: `오류: ${(e as Error).message}` }).catch(() => {});
     }
     return;
@@ -730,6 +888,7 @@ async function handleButton(interaction: any): Promise<void> {
         .setTimestamp();
       await interaction.editReply({ embeds: [embed] }).catch(() => {});
     } catch (e) {
+      LogUtil.logWarn(LOG_TAG, 'panel button failed', { key: 'recent_scalp', message: (e as Error).message });
       await interaction.editReply({ content: `오류: ${(e as Error).message}` }).catch(() => {});
     }
     return;
@@ -746,6 +905,7 @@ async function handleButton(interaction: any): Promise<void> {
         .setTimestamp();
       await interaction.editReply({ embeds: [embed] }).catch(() => {});
     } catch (e) {
+      LogUtil.logWarn(LOG_TAG, 'panel button failed', { key: 'recent_fills', message: (e as Error).message });
       await interaction.editReply({ content: `오류: ${(e as Error).message}` }).catch(() => {});
     }
     return;
@@ -764,6 +924,7 @@ async function handleButton(interaction: any): Promise<void> {
       const msg = result?.active ? '🏇 경주마 모드를 예약했습니다. 오전 9시에 자산 50% 투입.' : '❄️ 경주마 모드 OFF';
       await interaction.editReply({ content: result?.message || msg }).catch(() => {});
     } catch (e) {
+      LogUtil.logWarn(LOG_TAG, 'panel button failed', { key: 'race_horse_toggle', message: (e as Error).message });
       await interaction.editReply({ content: `오류 또는 미연동: ${(e as Error).message}` }).catch(() => {});
     }
     return;
@@ -795,6 +956,7 @@ async function handleButton(interaction: any): Promise<void> {
         await interaction.editReply({ content: '🔓 매매 엔진 기준 완화를 4시간 적용했습니다.' }).catch(() => {});
       }
     } catch (e) {
+      LogUtil.logWarn(LOG_TAG, 'panel button failed', { key: 'relax_threshold', message: (e as Error).message });
       await interaction.editReply({ content: `오류 또는 미연동: ${(e as Error).message}` }).catch(() => {});
     }
     return;
@@ -836,6 +998,7 @@ async function handleButton(interaction: any): Promise<void> {
         await interaction.editReply({ content: result?.success ? `🚀 초공격 스캘프 3시간 가동. (남은 시간: ${min}분)` : '요청 실패 또는 미연동.' }).catch(() => {});
       }
     } catch (e) {
+      LogUtil.logWarn(LOG_TAG, 'panel button failed', { key: 'scalp_attack', message: (e as Error).message });
       await interaction.editReply({ content: `오류 또는 미연동: ${(e as Error).message}` }).catch(() => {});
     }
     return;
@@ -851,6 +1014,7 @@ async function handleButton(interaction: any): Promise<void> {
       await api('/api/independent-scalp-stop', { method: 'POST' });
       await interaction.editReply({ content: '🛑 초공격 스캘프 중지됨.' }).catch(() => {});
     } catch (e) {
+      LogUtil.logWarn(LOG_TAG, 'panel button failed', { key: 'scalp_stop', message: (e as Error).message });
       await interaction.editReply({ content: `오류: ${(e as Error).message}` }).catch(() => {});
     }
     return;
@@ -867,6 +1031,7 @@ async function handleButton(interaction: any): Promise<void> {
       const min = result?.remainingMs != null ? Math.ceil(result.remainingMs / 60000) : 0;
       await interaction.editReply({ content: result?.success ? `연장 완료. (남은 시간: ${min}분)` : '연장 불가 (1시간 미만일 때만 가능)' }).catch(() => {});
     } catch (e) {
+      LogUtil.logWarn(LOG_TAG, 'panel button failed', { key: 'extend_independent_scalp', message: (e as Error).message });
       await interaction.editReply({ content: `오류: ${(e as Error).message}` }).catch(() => {});
     }
     return;
@@ -880,6 +1045,7 @@ async function handleButton(interaction: any): Promise<void> {
       const text = (result?.content ?? '').slice(0, 2000) || '데이터 없음';
       await interaction.editReply({ content: text }).catch(() => {});
     } catch (e) {
+      LogUtil.logWarn(LOG_TAG, 'panel button failed', { key: 'ai_entry_analysis', message: (e as Error).message });
       await interaction.editReply({ content: `오류 또는 미연동: ${(e as Error).message}` }).catch(() => {});
     }
     return;
@@ -897,6 +1063,7 @@ async function handleButton(interaction: any): Promise<void> {
       const embed = new MessageEmbed(embedJson as any);
       await interaction.editReply({ embeds: [embed] }).catch(() => {});
     } catch (e) {
+      LogUtil.logWarn(LOG_TAG, 'panel button failed', { key, message: (e as Error).message });
       await interaction.editReply({ content: `오류 또는 미연동: ${(e as Error).message}` }).catch(() => {});
     }
     return;
@@ -914,6 +1081,7 @@ async function handleButton(interaction: any): Promise<void> {
       const text = (result?.content ?? '').slice(0, 2000) || '데이터 없음';
       await interaction.editReply({ content: text }).catch(() => {});
     } catch (e) {
+      LogUtil.logWarn(LOG_TAG, 'panel button failed', { key, message: (e as Error).message });
       await interaction.editReply({ content: `오류 또는 미연동: ${(e as Error).message}` }).catch(() => {});
     }
     return;
@@ -984,6 +1152,7 @@ async function handleButton(interaction: any): Promise<void> {
       const result = await api<{ content?: string; ok?: boolean }>(apiPath, { method: 'POST' });
       await interaction.editReply({ content: result?.content ?? '요청 처리됨' }).catch(() => {});
     } catch (e) {
+      LogUtil.logWarn(LOG_TAG, 'panel button failed', { key: customId === 'admin_simple_restart' ? customId : key, message: (e as Error).message });
       await interaction.editReply({ content: `오류 또는 미연동: ${(e as Error).message}` }).catch(() => {});
     }
     return;
@@ -997,7 +1166,7 @@ async function handleButton(interaction: any): Promise<void> {
       if (key === 'current_status') {
         const [data, services] = await Promise.all([
           api<any>('/api/status'),
-          api<{ apiServer?: boolean; marketBot?: boolean; engineRunning?: boolean; details?: { apiServer?: { reason?: string | null }; marketBot?: { reason?: string | null }; engine?: { reason?: string | null } } }>('/api/services-status').catch(() => null),
+          api<{ apiServer?: boolean; marketBot?: boolean; engineRunning?: boolean; details?: { apiServer?: { reason?: string | null; reasonCode?: string; lastOkAt?: number | null; lastOkAgeSec?: number | null }; marketBot?: { reason?: string | null; reasonCode?: string; lastOkAt?: number | null; lastOkAgeSec?: number | null }; engine?: { reason?: string | null; reasonCode?: string; lastOkAt?: number | null; lastOkAgeSec?: number | null } } }>('/api/services-status').catch(() => null),
         ]);
         const embed = buildStatusEmbedFromApi(data, services ?? undefined);
         await interaction.editReply({ embeds: [embed] }).catch(() => {});
@@ -1042,6 +1211,7 @@ async function handleButton(interaction: any): Promise<void> {
         await interaction.editReply({ embeds: [embed] }).catch(() => {});
       }
     } catch (e) {
+      LogUtil.logWarn(LOG_TAG, 'panel button failed', { key, message: (e as Error).message });
       await interaction.editReply({ content: `오류: ${(e as Error).message}` }).catch(() => {});
     }
   }
@@ -1115,7 +1285,7 @@ async function handleSlash(interaction: any): Promise<void> {
     } else if (name === 'status') {
       const [data, services] = await Promise.all([
         api<any>('/api/status'),
-        api<{ apiServer?: boolean; marketBot?: boolean; engineRunning?: boolean; details?: { apiServer?: { reason?: string | null }; marketBot?: { reason?: string | null }; engine?: { reason?: string | null } } }>('/api/services-status').catch(() => null),
+        api<{ apiServer?: boolean; marketBot?: boolean; engineRunning?: boolean; details?: { apiServer?: { reason?: string | null; reasonCode?: string; lastOkAt?: number | null; lastOkAgeSec?: number | null }; marketBot?: { reason?: string | null; reasonCode?: string; lastOkAt?: number | null; lastOkAgeSec?: number | null }; engine?: { reason?: string | null; reasonCode?: string; lastOkAt?: number | null; lastOkAgeSec?: number | null } } }>('/api/services-status').catch(() => null),
       ]);
       const embed = buildStatusEmbedFromApi(data, services ?? undefined);
       await interaction.editReply({ embeds: [embed] }).catch(() => {});
@@ -1237,7 +1407,19 @@ client.once('ready', async () => {
   const clientId = (client as any).user?.id ?? null;
   panelRestoreWarn('READY', { start: true, clientId, channelId: channelId ?? null });
   LogUtil.logInfo(LOG_TAG, '서비스 가동 완료');
-  await registerSlashCommands(client);
+  // 부팅 시 api-server 연결 가능 여부 로그 (버튼 동작 진단용)
+  fetch(`${API_SERVER_URL}/api/health`).then(
+    (r) => {
+      if (r.ok) LogUtil.logInfo(LOG_TAG, 'api-server reachable at startup', { url: API_SERVER_URL });
+      else LogUtil.logWarn(LOG_TAG, 'api-server health non-OK at startup', { url: API_SERVER_URL, status: r.status });
+    },
+    (e) => LogUtil.logWarn(LOG_TAG, 'api-server unreachable at startup', { url: API_SERVER_URL, message: (e as Error).message }),
+  );
+  try {
+    await registerSlashCommands(client);
+  } catch (e) {
+    LogUtil.logWarn(LOG_TAG, 'slash command registration failed (버튼 패널은 정상 동작)', { message: (e as Error).message });
+  }
   const chId = channelId;
   if (chId) {
     try {
@@ -1263,28 +1445,40 @@ client.once('ready', async () => {
   if (adminId) scheduleHourlyHealthDm();
 });
 
+// Discord API InteractionType: ApplicationCommand=2, MessageComponent=3 (버튼/셀렉트)
+// discord.js는 interaction.type을 문자열로 설정함('MESSAGE_COMPONENT','APPLICATION_COMMAND') — 숫자/문자 모두 허용
+const INTERACTION_TYPE_APPLICATION_COMMAND = 2;
+const INTERACTION_TYPE_MESSAGE_COMPONENT = 3;
+
+function isMessageComponentInteraction(type: unknown): boolean {
+  return type === INTERACTION_TYPE_MESSAGE_COMPONENT || type === 'MESSAGE_COMPONENT';
+}
+function isApplicationCommandInteraction(type: unknown): boolean {
+  return type === INTERACTION_TYPE_APPLICATION_COMMAND || type === 'APPLICATION_COMMAND';
+}
+
 client.removeAllListeners('interactionCreate');
 client.on('interactionCreate', async (interaction: any) => {
+  const interactionType = interaction?.type ?? 'unknown';
   try {
-    if (
-      typeof interaction.isChatInputCommand === 'function' &&
-      interaction.isChatInputCommand()
-    ) {
-      await handleSlash(interaction);
-      return;
-    }
-    if (
-      typeof interaction.isButton === 'function' &&
-      interaction.isButton()
-    ) {
+    if (isMessageComponentInteraction(interactionType)) {
       await handleButton(interaction);
       return;
     }
-    // 확장: select menu / modal 등은 여기서 분기 추가
+    if (isApplicationCommandInteraction(interactionType)) {
+      await handleSlash(interaction);
+      return;
+    }
+    panelRestoreWarn('INTERACTION_UNHANDLED', { type: interactionType });
+    // 미처리여도 3초 내 응답 필요 — 상호작용 실패 방지
+    if (typeof interaction.reply === 'function') {
+      await interaction.reply({ content: '이 상호작용은 현재 처리되지 않습니다.', ephemeral: true }).catch(() => {});
+    }
   } catch (err) {
     LogUtil.logError(LOG_TAG, 'interaction error', {
+      interactionType,
       message: (err as Error).message,
-      stack: (err as Error).stack?.slice(0, 200),
+      stack: (err as Error).stack?.slice(0, 300),
     });
   }
 });

@@ -55,13 +55,16 @@ taskkill /F /IM node.exe
 - **주의**: PC에서 돌아가는 **모든** Node 프로세스가 종료됨.  
   다른 Node 앱이 있으면 같이 꺼지므로, 리팩터 앱만 문제일 때는 먼저 4-1 시도.
 
-### 4-3. 포트 3000 을 쓰는 프로세스만 kill (선택)
+### 4-3. 특정 포트를 쓰는 프로세스만 kill (선택)
+
+- **api-server**: 기본 포트 3100. `findstr :3100` 으로 확인 후 해당 PID만 종료 가능.
+- **market-bot**: 포트 3001. `findstr :3001` 로 확인.
 
 ```cmd
-for /f "tokens=5" %a in ('netstat -ano ^| findstr :3000') do taskkill /F /PID %a
+for /f "tokens=5" %a in ('netstat -ano ^| findstr :3100') do taskkill /F /PID %a
 ```
 
-- 3000 포트만 점유한 프로세스만 종료할 때 사용. CMD 한 줄 입력 시 `%a` 그대로, 배치 파일에서는 `%%a`.
+- CMD 한 줄 입력 시 `%a` 그대로, 배치 파일에서는 `%%a`.
 
 ---
 
@@ -133,9 +136,9 @@ npm run pm2:refactor:restart
    npm run pm2:refactor:stop
    pm2 kill
    ```
-3. **(선택) 포트 확인** — 3000 사용 중이면 4-3 참고
+3. **(선택) 포트 확인** — api-server 3100 / market-bot 3001 사용 중이면 4-3 참고
    ```cmd
-   netstat -ano | findstr :3000
+   netstat -ano | findstr :3100
    ```
 4. **10초 대기** — 포트 해제 대기
 5. **빌드 후 기동**
@@ -152,7 +155,7 @@ npm run pm2:refactor:safe-restart
 → stop → pm2 kill → 10초 대기 → 빌드 → start 순으로 실행됩니다.
 
 **taskkill이 필요한 경우**  
-- `pm2 kill` 후에도 3000 포트가 계속 점유되면, 4-2·4-3 참고.  
+- `pm2 kill` 후에도 3100(api-server) 포트가 계속 점유되면, 4-2·4-3 참고.  
 - **주의**: `taskkill /F /IM node.exe`는 PC의 모든 Node 프로세스를 종료하므로, 리팩터 앱만 문제일 때는 먼저 4-1·4-3을 시도하세요.
 
 ---
@@ -161,8 +164,42 @@ npm run pm2:refactor:safe-restart
 
 - **discord-operator**: 재기동 시 기존 패널 복구(또는 `FORCE_NEW_PANEL_ON_RESTART=true` 시 역할 A/B/C 메시지 3개 전송)로 Discord API 호출이 순차 실행됩니다. 보통 0.6~2초, 역할 3개 새로 보낼 때는 수 초~약 20초까지 걸릴 수 있습니다.
 - **market-bot**: `server.js` 로드 실패 시 PM2가 재시작을 반복하면서 Stale lock 제거 → require 실패 → 크래시가 반복되면 재기동이 길어질 수 있습니다. `server.js` 문법 오류가 없다면 `node --check server.js` 로 확인 후 재기동하세요.
-- **api-server**: 포트 3000 충돌 시 **exit 대신 동일 포트 재시도**를 하므로, 예전처럼 10초마다 exit → PM2 재시작 루프는 줄었습니다. 그래도 CMD가 반복해서 열렸다 닫혔다 하면 **8장 안전 재기동**(`pm2 kill` 후 10초 대기, 한 번만 `npm run pm2:refactor`)으로 정리하세요. 메모리 초과 시에는 ecosystem의 `max_memory_restart`(800M), `restart_delay`·`exp_backoff_restart_delay`로 완화됩니다.
-- **로그 확인**: `logs/pm2-discord-operator-error.log`, `logs/pm2-market-bot-error.log`, `logs/pm2-api-server-error.log` 에서 `REST is not a constructor`, `panelContract_1 before initialization`, `interaction.isChatInputCommand is not a function`, `SyntaxError: Unexpected end of input`, `Port 3000 already in use` 등이 있으면 해당 항목 수정 후 재기동합니다.
+- **api-server**: 기본 포트 **3100** (환경변수 `PORT` 또는 `API_SERVER_PORT`). 포트 충돌 시 exit 대신 재시도하므로 PM2 재시작 루프는 완화됩니다. CMD가 반복해서 열렸다 닫혔다 하면 **8장 안전 재기동**으로 정리하세요.
+- **discord-operator**: api-server 호출은 `API_SERVER_URL`(기본 `http://localhost:3100`) 사용. .env 또는 ecosystem에서 일치시키세요.
+- **api-server**: market-bot 호출은 `MARKET_BOT_URL` 사용. 리팩터 스택에서는 ecosystem.refactor.config.cjs에서 `http://localhost:3001` 로 고정( market-bot 포트 3001). .env에 `MARKET_BOT_URL=http://localhost:3000` 이 있으면 레거시( server.js 3000)용이며, pm2:refactor 시에는 ecosystem 설정이 우선됩니다.
+- **로그 확인**: `logs/pm2-*-error.log` 에서 `Port 3100 already in use`, `api-server 연결 실패`, `api non-OK response` / `fetch failed`(→ market-bot 미연동 시 503), `interaction.isChatInputCommand is not a function` 등이 있으면 해당 항목 수정 후 재기동합니다.
+
+### 9-1. 디스코드 버튼 전수 — API 경로 및 원인 정리
+
+버튼 반 이상이 동일 원인(예: market-bot 미연동)으로 실패할 수 있음. 아래는 **버튼 → api-server 경로 → api-server 동작(proxy=market-bot 호출, direct=api-server 자체 처리)**.
+
+| 버튼(키) | API 경로 | api-server 동작 | 비고 |
+|----------|----------|-----------------|------|
+| 엔진 가동 | POST /api/engine/start | **proxy** | market-bot 3001 필요 |
+| 즉시 정지 | POST /api/engine/stop | **proxy** | 동일 |
+| 현재 상태 | GET /api/status, /api/services-status | **proxy** + direct | status는 proxy |
+| 현재 수익률 | GET /api/pnl | **proxy** | |
+| 전체 매도 | POST /api/sell-all | **proxy** | |
+| 경주마 ON/OFF | POST /api/race-horse-toggle | **proxy** | |
+| 기준 완화 / 연장 | GET /api/relax-status, POST /api/relax, /api/relax-extend | **proxy** | |
+| 초공격 scalp / 중지 / 연장 | POST /api/independent-scalp-* | **proxy** | |
+| 현재전략 | GET /api/strategy-config | direct | |
+| 전략(SAFE 등) | POST /api/strategy-mode | direct | |
+| 최근스캘 | GET /api/strategy-status | direct | |
+| 최근체결 | GET /api/strategy-status | direct | |
+| AI 타점 분석 | GET /api/ai_analysis | **proxy** | |
+| 시황 요약 | GET /api/analyst/summary | direct | |
+| 급등주 분석 | GET /api/analyst/scan-vol | direct | |
+| 주요지표 | GET /api/analyst/indicators | direct | |
+| 거래 부재 진단 / 로직 수정안 제안 | GET /api/analyst/diagnose_no_trade, suggest_logic | **proxy** | |
+| 조언자의 한마디 / 하루치 로그 / API 사용량 | GET /api/analyst/advisor_one_liner, daily_log_analysis, api_usage_monitor | **proxy** | |
+| 헬스 | GET /api/health | direct | |
+| 비상 제어(확인 후) | POST /api/admin/cleanup-processes, force-kill-bot | direct | |
+| 시스템 업데이트 / 프로세스 재기동 | POST /api/admin/git-pull-restart, simple-restart | **proxy** | |
+
+- **proxy** 로 표시된 버튼이 한꺼번에 실패하면 → **market-bot 미기동 또는 MARKET_BOT_URL 불일치(기본 3001)** 가 원인. `pm2 list` 로 market-bot online 확인, ecosystem의 `MARKET_BOT_URL: 'http://localhost:3001'` 확인.
+- **direct** 만 실패하면 → api-server 자체(3100) 또는 api-server 내부 서비스(Gemini, Upbit 등) 점검.
+- 로그에서 `panel button failed` + `key` 로 어느 버튼에서 실패했는지 확인 가능.
 
 ---
 

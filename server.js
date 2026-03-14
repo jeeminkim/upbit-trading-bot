@@ -3601,25 +3601,25 @@ const initPromise = (async () => {
 })();
 
 if (require.main !== module) {
-  module.exports = {
-    initPromise,
-    state,
-    EngineStateStore,
-    tradingEngine,
-    app,
-    io,
-    server,
-    fetchAssets,
-    runScalpCycle,
-    buildCurrentStateEmbed,
-    getProfitPct,
-    apiKeys,
-    SCALP_MARKETS,
-    upbit,
-    TradeExecutor,
-    db,
-    discordHandlers: _exportDiscordHandlers
-  };
+  const exp = module.exports || {};
+  exp.initPromise = initPromise;
+  exp.state = state;
+  exp.EngineStateStore = EngineStateStore;
+  exp.tradingEngine = tradingEngine;
+  exp.app = app;
+  exp.io = io;
+  exp.server = server;
+  exp.fetchAssets = fetchAssets;
+  exp.runScalpCycle = runScalpCycle;
+  exp.buildCurrentStateEmbed = buildCurrentStateEmbed;
+  exp.getProfitPct = getProfitPct;
+  exp.apiKeys = apiKeys;
+  exp.SCALP_MARKETS = SCALP_MARKETS;
+  exp.upbit = upbit;
+  exp.TradeExecutor = TradeExecutor;
+  exp.db = db;
+  // discordHandlers는 IIFE 내부(3485)에서만 설정 — 여기서 넣으면 아직 null이라 덮어쓰지 않음
+  module.exports = exp;
 }
 }
 

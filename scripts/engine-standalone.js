@@ -38,6 +38,45 @@ const runtimeStrategyConfig = require(path.join(root, 'lib', 'runtimeStrategyCon
 require(path.join(root, 'dist-refactor', 'apps', 'trading-engine', 'src', 'index.js'));
 
 const ENGINE_PORT = Number(process.env.ENGINE_PORT) || 3001;
+const SCALP_MARKETS = ['KRW-BTC', 'KRW-ETH', 'KRW-XRP', 'KRW-SOL'];
+
+/** server.fetchAssets가 없을 때 Upbit 직접 호출로 자산 조회 (proxy 버튼 동작 보장) */
+async function fetchAssetsFallback() {
+  const fs = require('fs');
+  const CONFIG_PATH = process.env.CONFIG_PATH || path.join(root, 'config.json');
+  const fromEnv = (key, def = '') => (process.env[key] || '').trim() || def;
+  let accessKey = fromEnv('UPBIT_ACCESS_KEY', '');
+  let secretKey = fromEnv('UPBIT_SECRET_KEY', '');
+  if (server && server.apiKeys && (server.apiKeys.accessKey || server.apiKeys.secretKey)) {
+    accessKey = server.apiKeys.accessKey || accessKey;
+    secretKey = server.apiKeys.secretKey || secretKey;
+  } else if (fs.existsSync(CONFIG_PATH)) {
+    try {
+      const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+      accessKey = config.access_key || accessKey;
+      secretKey = config.secret_key || secretKey;
+    } catch (_) {}
+  }
+  if (!accessKey || !secretKey) return null;
+  const upbit = require(path.join(root, 'lib', 'upbit'));
+  const [accounts, tickers] = await Promise.all([
+    upbit.getAccounts(accessKey, secretKey),
+    upbit.getTickers(SCALP_MARKETS)
+  ]);
+  return upbit.summarizeAccounts(accounts, tickers);
+}
+
+/** /status, /pnl 공통: server.fetchAssets 우선, 없으면 fallback 사용 */
+async function getAssetsForStatus() {
+  const s = server;
+  if (!s) return null;
+  const init = s.initPromise || s.init;
+  if (init && typeof init.then === 'function') await init;
+  const fn = typeof s.fetchAssets === 'function' ? s.fetchAssets : null;
+  if (fn) return await fn();
+  return await fetchAssetsFallback();
+}
+
 const app = express();
 app.use(express.json());
 
@@ -68,17 +107,17 @@ app.post('/engine/stop', (req, res) => {
 
 app.get('/status', async (_req, res) => {
   try {
-    const s = server;
-    await s.initPromise;
-    s.state.assets = await s.fetchAssets();
-    const assets = s.state.assets;
+    if (!server) return res.status(503).json({ error: 'server module not loaded' });
+    const assets = await getAssetsForStatus();
+    if (assets == null) return res.status(503).json({ error: 'fetchAssets not available (server not ready)', message: 'API 키(config.json 또는 .env)를 확인하세요.' });
+    if (server.state) server.state.assets = assets;
     const ProfitCalculationService = require(path.join(root, 'dist-refactor', 'packages', 'core', 'src', 'ProfitCalculationService.js')).ProfitCalculationService;
     const summary = ProfitCalculationService.getSummary(assets);
     res.json({
       assets,
       profitSummary: summary,
-      strategySummary: s.state.strategySummary || null,
-      botEnabled: s.state.botEnabled,
+      strategySummary: (server.state && server.state.strategySummary) || null,
+      botEnabled: (server.state && server.state.botEnabled) != null ? server.state.botEnabled : null,
     });
   } catch (e) {
     res.status(500).json({ error: (e && e.message) || 'Unknown' });
@@ -87,11 +126,12 @@ app.get('/status', async (_req, res) => {
 
 app.get('/pnl', async (_req, res) => {
   try {
-    const s = server;
-    await s.initPromise;
-    s.state.assets = await s.fetchAssets();
-    const summary = require(path.join(root, 'dist-refactor', 'packages', 'core', 'src', 'ProfitCalculationService.js')).ProfitCalculationService.getSummary(s.state.assets);
-    res.json({ assets: s.state.assets, profitSummary: summary });
+    if (!server) return res.status(503).json({ error: 'server module not loaded' });
+    const assets = await getAssetsForStatus();
+    if (assets == null) return res.status(503).json({ error: 'fetchAssets not available (server not ready)', message: 'API 키(config.json 또는 .env)를 확인하세요.' });
+    if (server.state) server.state.assets = assets;
+    const summary = require(path.join(root, 'dist-refactor', 'packages', 'core', 'src', 'ProfitCalculationService.js')).ProfitCalculationService.getSummary(assets);
+    res.json({ assets, profitSummary: summary });
   } catch (e) {
     res.status(500).json({ error: (e && e.message) || 'Unknown' });
   }
@@ -100,9 +140,11 @@ app.get('/pnl', async (_req, res) => {
 app.get('/dashboard', async (_req, res) => {
   try {
     const s = server;
-    await s.initPromise;
+    if (!s) return res.status(503).json({ error: 'server module not loaded' });
+    const init = s.initPromise || s.init;
+    if (init && typeof init.then === 'function') await init;
     const state = require(path.join(root, 'dist-refactor', 'packages', 'core', 'src', 'EngineStateService.js')).EngineStateService.getState();
-    const summary = require(path.join(root, 'dist-refactor', 'packages', 'core', 'src', 'ProfitCalculationService.js')).ProfitCalculationService.getSummary(state.assets);
+    const summary = require(path.join(root, 'dist-refactor', 'packages', 'core', 'src', 'ProfitCalculationService.js')).ProfitCalculationService.getSummary(state.assets || []);
     res.json({
       assets: state.assets,
       profitSummary: summary,
@@ -117,7 +159,9 @@ app.get('/dashboard', async (_req, res) => {
 app.post('/sell-all', async (req, res) => {
   try {
     const s = server;
-    await s.initPromise;
+    const init = s && (s.initPromise || s.init);
+    if (init && typeof init.then === 'function') await init;
+    if (!s || !s.discordHandlers) return res.status(503).json({ error: 'discordHandlers not ready', message: 'market-bot이 서버 초기화 중입니다. 1~2분 후 다시 시도하세요.' });
     const result = await s.discordHandlers.sellAll();
     const ok = typeof result === 'string';
     res.json(ok ? { success: true, message: result } : { success: false, message: String(result || 'Unknown') });
@@ -127,13 +171,31 @@ app.post('/sell-all', async (req, res) => {
 });
 
 // ——— Discord 패널 복구: 역할 A/B/C 버튼용 proxy (discordHandlers 호출) ———
+// initPromise 완료 후 discordHandlers가 IIFE 내부에서 설정되므로 요청 시 최대 15초 대기
+async function waitForDiscordHandlers(maxMs) {
+  const step = 400;
+  const deadline = Date.now() + (maxMs || 15000);
+  while (Date.now() < deadline) {
+    const h = server && server.discordHandlers;
+    if (h) return h;
+    await new Promise((r) => setTimeout(r, step));
+  }
+  return server && server.discordHandlers;
+}
+
 function withServer(fn) {
   return async (req, res) => {
     try {
       const init = server && (server.initPromise || server.init);
       if (init && typeof init.then === 'function') await init;
-      const h = server && server.discordHandlers;
-      if (!h) return res.status(503).json({ error: 'discordHandlers not ready' });
+      let h = server && server.discordHandlers;
+      if (!h) h = await waitForDiscordHandlers(5000);
+      if (!h) {
+        return res.status(503).json({
+          error: 'discordHandlers not ready',
+          message: 'market-bot이 서버 초기화 중입니다. 1~2분 후 다시 시도하세요.',
+        });
+      }
       return await fn(req, res, h);
     } catch (e) {
       res.status(500).json({ error: (e && e.message) || 'Unknown' });
@@ -224,19 +286,18 @@ app.post('/admin/simple-restart', withServer(async (_req, res, h) => {
   res.json({ ok: true, content });
 }));
 
-const initPromise = server && (server.initPromise || server.init);
-if (initPromise && typeof initPromise.then === 'function') {
-  initPromise.then(() => {
-    EngineControlService.startEngine('system');
-    console.log('[market-bot] trading loop started (ENGINE_STARTED)');
+// 즉시 listen → api-server가 "fetch failed" 없이 연결 가능. /status·/pnl은 fallback, analyst는 withServer에서 대기 후 503 또는 정상 응답
+app.listen(ENGINE_PORT, () => {
+  console.log('[market-bot] engine API http://localhost:' + ENGINE_PORT);
+});
+
+const init = server && (server.initPromise || server.init);
+if (init && typeof init.then === 'function') {
+  init.then(() => {
+    console.log('[market-bot] server ready. Engine remains STOPPED until Discord [엔진 가동] is used.');
   }).catch((e) => {
     console.error('[market-bot] server init failed:', e && e.message);
   });
 } else {
-  console.warn('[market-bot] server.initPromise not available, starting engine without wait');
-  EngineControlService.startEngine('system');
+  console.warn('[market-bot] server.initPromise not available.');
 }
-
-app.listen(ENGINE_PORT, () => {
-  console.log('[market-bot] engine API http://localhost:' + ENGINE_PORT);
-});

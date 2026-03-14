@@ -102,46 +102,208 @@ app.get('/api/engine-status', async (_req: Request, res: Response) => {
   res.status(r.status || 503).json(r.data || { status: 'unavailable', error: 'Engine (market-bot) unavailable' });
 });
 
-/** proxy 실패 시 운영자가 "왜 false인지" 알 수 있도록 reason 문자열로 정규화 */
-function deriveReason(r: { ok: boolean; data?: { error?: string }; status?: number }): string | null {
-  if (r.ok) return null;
+/** reasonCode: 집계/표시용 표준 코드. 문자열 오타 방지용 상수 */
+const REASON_CODE = {
+  OK: 'OK',
+  TIMEOUT: 'TIMEOUT',
+  CONNECTION_REFUSED: 'CONNECTION_REFUSED',
+  UNREACHABLE: 'UNREACHABLE',
+  STOPPED: 'STOPPED',
+  UNAVAILABLE: 'UNAVAILABLE',
+} as const;
+
+type ServiceReasonCode = typeof REASON_CODE[keyof typeof REASON_CODE];
+
+function deriveReasonAndCode(r: { ok: boolean; data?: { error?: string }; status?: number }): { reason: string | null; reasonCode: ServiceReasonCode } {
+  if (r.ok) return { reason: null, reasonCode: REASON_CODE.OK };
   const msg = (r.data?.error ?? '').toLowerCase();
-  if (msg.includes('abort') || msg.includes('timeout')) return 'timeout';
-  if (msg.includes('econnrefused') || msg.includes('connection refused')) return 'connection refused';
-  if (msg.includes('enotfound') || msg.includes('getaddrinfo')) return 'unreachable';
-  return r.data?.error ?? 'unavailable';
+  if (msg.includes('abort') || msg.includes('timeout')) return { reason: 'timeout', reasonCode: REASON_CODE.TIMEOUT };
+  if (msg.includes('econnrefused') || msg.includes('connection refused')) return { reason: 'connection refused', reasonCode: REASON_CODE.CONNECTION_REFUSED };
+  if (msg.includes('enotfound') || msg.includes('getaddrinfo')) return { reason: 'unreachable', reasonCode: REASON_CODE.UNREACHABLE };
+  return { reason: r.data?.error ?? 'unavailable', reasonCode: REASON_CODE.UNAVAILABLE };
 }
 
 /** 서비스 상태 패널용. market-bot 무응답 시에도 짧은 시간 내 응답하도록 timeout 적용(전체 API block 방지). */
 const SERVICES_STATUS_TIMEOUT_MS = 5000;
-// 설계 포인트: Promise.allSettled 전환 시 한 쪽 실패해도 다른 쪽 결과+reason을 그대로 반환 가능. 현재 all로도 reason은 deriveReason으로 보완됨.
-// 설계 포인트: 반복 호출 부담 완화 시 1~2초 TTL 캐시(lastFetchedAt/cachedStatus) 검토 가능. 이번 턴은 미구현.
-// 설계 포인트: timeout/연결 실패 횟수 집계 시 in-memory counter(예: servicesStatusTimeoutCount) 추가 가능. 메트릭 대확장 없이 운영 가시성만 강화.
+const SERVICES_STATUS_TTL_MS = 1500;
+/** in-flight Promise가 hang 시 deadlock 방지. 이 시간 초과 시 fallback 반환 후 inFlight 정리 */
+const SERVICES_STATUS_IN_FLIGHT_TIMEOUT_MS = 8000;
 
-app.get('/api/services-status', async (_req: Request, res: Response) => {
-  const [statusR, engineR] = await Promise.all([
-    proxyToMarketBot('/status', { timeoutMs: SERVICES_STATUS_TIMEOUT_MS }),
-    proxyToMarketBot('/engine-status', { timeoutMs: SERVICES_STATUS_TIMEOUT_MS }),
-  ]);
+/** 마지막 정상 응답 시각 (in-memory). first run null 허용 */
+let lastMarketBotOkAt: number | null = null;
+let lastEngineOkAt: number | null = null;
+
+/** TTL 캐시: 연타/동시 호출 시 market-bot 부하 완화. Redis/파일 금지, in-memory만 */
+let cachedServicesStatus: { result: ServicesStatusResponse; fetchedAt: number } | null = null;
+
+/** 동시 요청 deduplication: TTL miss 시 실제 fetch는 1번만, 나머지는 같은 Promise await. timeout 시 fallback으로 resolve 후 정리 */
+let servicesStatusInFlight: Promise<ServicesStatusResponse> | null = null;
+
+interface ServicesStatusResponse {
+  apiServer: boolean;
+  marketBot: boolean;
+  engineRunning: boolean;
+  details: {
+    apiServer: { reasonCode: string; reason: string | null; lastOkAt: number | null; lastOkAgeSec: number | null };
+    marketBot: { reasonCode: string; reason: string | null; lastOkAt: number | null; lastOkAgeSec: number | null };
+    engine: { reasonCode: string; reason: string | null; lastOkAt: number | null; lastOkAgeSec: number | null };
+  };
+}
+
+function buildServicesStatusResponse(
+  statusR: { ok: boolean; data?: any },
+  engineR: { ok: boolean; data?: any }
+): ServicesStatusResponse {
   const marketBot = statusR.ok === true;
   const engineStatus = engineR.ok && engineR.data ? (engineR.data as { status?: string }).status : undefined;
   const engineRunning = engineStatus === 'RUNNING';
 
-  const marketBotReason = deriveReason(statusR);
-  const engineReason: string | null = engineR.ok
-    ? (engineRunning ? null : 'stopped')
-    : deriveReason(engineR);
+  const now = Date.now();
+  if (statusR.ok) lastMarketBotOkAt = now;
+  if (engineR.ok && engineRunning) lastEngineOkAt = now;
 
-  res.json({
+  const marketBotRC = deriveReasonAndCode(statusR);
+  const engineReasonCode: { reason: string | null; reasonCode: ServiceReasonCode } = engineR.ok
+    ? (engineRunning ? { reason: null, reasonCode: REASON_CODE.OK } : { reason: 'stopped', reasonCode: REASON_CODE.STOPPED })
+    : deriveReasonAndCode(engineR);
+
+  const age = (ts: number | null) => (ts != null ? Math.floor((now - ts) / 1000) : null);
+
+  return {
     apiServer: true,
     marketBot,
     engineRunning: !!engineRunning,
     details: {
-      apiServer: { reason: null as string | null },
-      marketBot: { reason: marketBotReason },
-      engine: { reason: engineReason },
+      apiServer: {
+        reasonCode: REASON_CODE.OK,
+        reason: null,
+        lastOkAt: now,
+        lastOkAgeSec: 0,
+      },
+      marketBot: {
+        reasonCode: marketBotRC.reasonCode,
+        reason: marketBotRC.reason,
+        lastOkAt: lastMarketBotOkAt,
+        lastOkAgeSec: age(lastMarketBotOkAt),
+      },
+      engine: {
+        reasonCode: engineReasonCode.reasonCode,
+        reason: engineReasonCode.reason,
+        lastOkAt: lastEngineOkAt,
+        lastOkAgeSec: age(lastEngineOkAt),
+      },
     },
-  });
+  };
+}
+
+/** fetch 예외 시 사용. reasonCode/reason/lastOkAt/lastOkAgeSec 구조 유지, lastOkAt은 기존 메모리 값 유지 */
+function buildFallbackServicesStatusResponse(errorMessage: string): ServicesStatusResponse {
+  const now = Date.now();
+  const age = (ts: number | null) => (ts != null ? Math.floor((now - ts) / 1000) : null);
+  return {
+    apiServer: true,
+    marketBot: false,
+    engineRunning: false,
+    details: {
+      apiServer: {
+        reasonCode: REASON_CODE.OK,
+        reason: null,
+        lastOkAt: now,
+        lastOkAgeSec: 0,
+      },
+      marketBot: {
+        reasonCode: REASON_CODE.UNAVAILABLE,
+        reason: errorMessage || 'status fetch failed',
+        lastOkAt: lastMarketBotOkAt,
+        lastOkAgeSec: age(lastMarketBotOkAt),
+      },
+      engine: {
+        reasonCode: REASON_CODE.UNAVAILABLE,
+        reason: errorMessage || 'status fetch failed',
+        lastOkAt: lastEngineOkAt,
+        lastOkAgeSec: age(lastEngineOkAt),
+      },
+    },
+  };
+}
+
+/** TTL 밖에서만 호출. 동시 요청 시 이 Promise를 공유해 fetch 1회만 수행. 예외 시 fallback 반환으로 resolve 유지 */
+async function fetchServicesStatusInternal(): Promise<ServicesStatusResponse> {
+  try {
+    const [statusR, engineR] = await Promise.all([
+      proxyToMarketBot('/status', { timeoutMs: SERVICES_STATUS_TIMEOUT_MS }),
+      proxyToMarketBot('/engine-status', { timeoutMs: SERVICES_STATUS_TIMEOUT_MS }),
+    ]);
+    return buildServicesStatusResponse(statusR, engineR);
+  } catch (e) {
+    return buildFallbackServicesStatusResponse((e as Error).message);
+  }
+}
+
+/** in-flight에 최대 대기 시간 적용. 초과 시 fallback 반환하여 deadlock 방지. 항상 resolve. */
+function startServicesStatusInFlight(): Promise<ServicesStatusResponse> {
+  return (async () => {
+    try {
+      return await Promise.race([
+        fetchServicesStatusInternal(),
+        new Promise<ServicesStatusResponse>((_, reject) =>
+          setTimeout(() => reject(new Error('services-status in-flight timeout')), SERVICES_STATUS_IN_FLIGHT_TIMEOUT_MS)
+        ),
+      ]);
+    } catch (e) {
+      return buildFallbackServicesStatusResponse((e as Error).message);
+    }
+  })();
+}
+
+/** debug: 요청당 1줄. cache hit / inFlight reuse / reasonCode 모니터링용 */
+function logServicesStatusDebug(result: ServicesStatusResponse, cacheHit: boolean, inFlightReuse: boolean): void {
+  try {
+    const mb = result.details.marketBot.reasonCode;
+    const eng = result.details.engine.reasonCode;
+    console.log('[api-server][services-status] cacheHit=' + (cacheHit ? 1 : 0) + ' inFlightReuse=' + (inFlightReuse ? 1 : 0) + ' marketBot=' + mb + ' engine=' + eng);
+  } catch (_) {}
+}
+
+/** 캐시된 응답 반환 시 lastOkAgeSec만 현재 시각 기준으로 갱신 */
+function refreshCachedServicesStatus(cached: ServicesStatusResponse): ServicesStatusResponse {
+  const now = Date.now();
+  const age = (ts: number | null) => (ts != null ? Math.floor((now - ts) / 1000) : null);
+  return {
+    ...cached,
+    details: {
+      apiServer: { ...cached.details.apiServer, lastOkAgeSec: 0 },
+      marketBot: { ...cached.details.marketBot, lastOkAgeSec: age(cached.details.marketBot.lastOkAt) },
+      engine: { ...cached.details.engine, lastOkAgeSec: age(cached.details.engine.lastOkAt) },
+    },
+  };
+}
+
+/** 순서: 1) TTL cache hit → 즉시 캐시 반환. 2) TTL miss → inFlight 있으면 await. 3) 없으면 새 fetch 시작. 중복 fetch 방지. */
+app.get('/api/services-status', async (_req: Request, res: Response) => {
+  const now = Date.now();
+  if (cachedServicesStatus !== null && now - cachedServicesStatus.fetchedAt < SERVICES_STATUS_TTL_MS) {
+    const out = refreshCachedServicesStatus(cachedServicesStatus.result);
+    logServicesStatusDebug(out, true, false);
+    return res.json(out);
+  }
+
+  if (servicesStatusInFlight !== null) {
+    const result = await servicesStatusInFlight;
+    const out = refreshCachedServicesStatus(result);
+    logServicesStatusDebug(out, false, true);
+    return res.json(out);
+  }
+
+  servicesStatusInFlight = startServicesStatusInFlight();
+  try {
+    const result = await servicesStatusInFlight;
+    cachedServicesStatus = { result, fetchedAt: Date.now() };
+    logServicesStatusDebug(result, false, false);
+    return res.json(result);
+  } finally {
+    servicesStatusInFlight = null;
+  }
 });
 
 app.post('/api/engine/start', async (req: Request, res: Response) => {
@@ -754,12 +916,12 @@ EventBus.subscribe('DASHBOARD_EMIT', (payload: { lastEmit: any }) => {
   emitConsoleToAll();
 });
 
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = Number(process.env.API_SERVER_PORT || process.env.PORT) || 3100;
 
-// ——— 포트 재시도: exit 루프 대신 일정 간격 재시도 (중복 타이머/리스너 방지)
-// 리스너: 매 시도마다 httpServer.once('error', ...) 1회만 등록. EADDRINUSE 시 핸들러 실행 후 제거(once) → 재시도 시 새 1회 등록. 성공 시 미발화로 1개 유지(누적 없음).
-const MAX_LISTEN_RETRIES = 10;
-const LISTEN_RETRY_MS = 5000;
+// ——— 포트 바인딩 재시도: process.exit 사용 금지. PM2 restart loop 방지를 위해 무한 재시도.
+// 리스너: 매 시도마다 httpServer.once('error', ...) 1회만 등록. EADDRINUSE/기타 오류 시 delay 후 재시도.
+const RETRY_BASE_MS = 5000;
+const MAX_RETRY_DELAY = 15000;
 let listenRetryCount = 0;
 let listenRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -771,9 +933,12 @@ function onListenSuccess(): void {
   console.log('[startup] app=api-server port=' + PORT + ' ADMIN_ID loaded: ' + (adminStatus.adminConfigPresent ? 'Yes' : 'No') + ' runtimeMode=' + (strategyState?.mode || '—') + ' no engine (proxy to market-bot)');
   console.log('[api-server] no engine side effects confirmed');
 
-  // 운영 관찰: 5분마다 메모리 사용량 로그 (leak 추적: 절대값 + 직전 대비 delta)
+  // 운영 관찰: 5분마다 메모리 사용량 로그 (leak 추적: 절대값 + 직전 대비 delta + 연속 증가 경고)
   const MEMORY_LOG_INTERVAL_MS = 5 * 60 * 1000;
+  const MEMORY_INCREASE_WARN_THRESHOLD = 5;
   let lastMemorySnapshot: { rss: number; heapUsed: number; heapTotal: number; external: number } | null = null;
+  let heapIncreaseCount = 0;
+  let externalIncreaseCount = 0;
   setInterval(() => {
     try {
       const mu = process.memoryUsage();
@@ -783,19 +948,27 @@ function onListenSuccess(): void {
       const external = (mu as NodeJS.MemoryUsage).external ?? 0;
       const externalMb = Math.round(external / 1024 / 1024);
 
+      let dr = 0;
+      let dh = 0;
+      let de = 0;
       let rssDelta = '';
       let heapUsedDelta = '';
       let heapTotalDelta = '';
       let externalDelta = '';
       if (lastMemorySnapshot !== null) {
-        const dr = Math.round((mu.rss - lastMemorySnapshot.rss) / 1024 / 1024);
-        const dh = Math.round((mu.heapUsed - lastMemorySnapshot.heapUsed) / 1024 / 1024);
+        dr = Math.round((mu.rss - lastMemorySnapshot.rss) / 1024 / 1024);
+        dh = Math.round((mu.heapUsed - lastMemorySnapshot.heapUsed) / 1024 / 1024);
         const dt = Math.round((mu.heapTotal - lastMemorySnapshot.heapTotal) / 1024 / 1024);
-        const de = Math.round((external - lastMemorySnapshot.external) / 1024 / 1024);
+        de = Math.round((external - lastMemorySnapshot.external) / 1024 / 1024);
         rssDelta = dr >= 0 ? ' +' + dr + 'MB' : ' ' + dr + 'MB';
         heapUsedDelta = dh >= 0 ? ' +' + dh + 'MB' : ' ' + dh + 'MB';
         heapTotalDelta = dt >= 0 ? ' +' + dt + 'MB' : ' ' + dt + 'MB';
         externalDelta = de >= 0 ? ' +' + de + 'MB' : ' ' + de + 'MB';
+
+        if (dh > 0) heapIncreaseCount++;
+        else heapIncreaseCount = 0;
+        if (de > 0) externalIncreaseCount++;
+        else externalIncreaseCount = 0;
       } else {
         rssDelta = heapUsedDelta = heapTotalDelta = externalDelta = ' (first)';
       }
@@ -807,34 +980,57 @@ function onListenSuccess(): void {
         ' heapTotal=' + heapTotalMb + 'MB' + heapTotalDelta +
         ' external=' + externalMb + 'MB' + externalDelta
       );
+
+      if (heapIncreaseCount >= MEMORY_INCREASE_WARN_THRESHOLD) {
+        const drStr = dr >= 0 ? ' +' + dr + 'MB' : ' ' + dr + 'MB';
+        const dhStr = dh >= 0 ? ' +' + dh + 'MB' : ' ' + dh + 'MB';
+        const deStr = de >= 0 ? ' +' + de + 'MB' : ' ' + de + 'MB';
+        console.warn(
+          '[api-server][memory][warn] heapUsed increasing continuously',
+          'rss=' + rssMb + 'MB' + drStr + ', heapUsed=' + heapUsedMb + 'MB' + dhStr + ', external=' + externalMb + 'MB' + deStr + ', heapIncreaseCount=' + heapIncreaseCount
+        );
+      }
+      if (externalIncreaseCount >= MEMORY_INCREASE_WARN_THRESHOLD) {
+        const drStr = dr >= 0 ? ' +' + dr + 'MB' : ' ' + dr + 'MB';
+        const dhStr = dh >= 0 ? ' +' + dh + 'MB' : ' ' + dh + 'MB';
+        const deStr = de >= 0 ? ' +' + de + 'MB' : ' ' + de + 'MB';
+        console.warn(
+          '[api-server][memory][warn] external increasing continuously',
+          'rss=' + rssMb + 'MB' + drStr + ', heapUsed=' + heapUsedMb + 'MB' + dhStr + ', external=' + externalMb + 'MB' + deStr + ', externalIncreaseCount=' + externalIncreaseCount
+        );
+      }
     } catch (_) {}
   }, MEMORY_LOG_INTERVAL_MS);
 }
 
-function tryListen(): void {
+/** 포트 바인딩 재시도. EADDRINUSE/기타 오류 시에도 process.exit 없이 delay 후 재시도하여 PM2 restart loop 방지. */
+function startServer(port: number): void {
   if (listenRetryTimer !== null) return;
 
   httpServer.once('error', (err: NodeJS.ErrnoException) => {
+    listenRetryCount++;
+    const delay =
+      Math.min(RETRY_BASE_MS * listenRetryCount, MAX_RETRY_DELAY) +
+      Math.floor(Math.random() * 1000);
+    const sec = Math.round(delay / 1000);
+
     if (err.code === 'EADDRINUSE') {
-      listenRetryCount++;
-      const sec = Math.round(LISTEN_RETRY_MS / 1000);
-      console.error('[api-server] Port ' + PORT + ' already in use. retry #' + listenRetryCount + ' in ' + sec + 's');
-      if (listenRetryCount >= MAX_LISTEN_RETRIES) {
-        console.error('[api-server] Max listen retries reached, exiting. Stop other process on port ' + PORT + ' or set PORT=3001 in .env');
-        process.exit(1);
-      }
-      listenRetryTimer = setTimeout(() => {
-        listenRetryTimer = null;
-        tryListen();
-      }, LISTEN_RETRY_MS);
-      return;
+      console.warn('[api-server] port ' + port + ' already in use');
+      console.warn('[api-server] retrying port bind retryCount=' + listenRetryCount + ' delay=' + delay + 'ms (' + sec + 's)');
+    } else {
+      console.error('[api-server] server error (will retry)', err.code || err.message);
+      console.warn('[api-server] retrying port bind retryCount=' + listenRetryCount + ' delay=' + delay + 'ms (' + sec + 's)');
     }
-    throw err;
+
+    listenRetryTimer = setTimeout(() => {
+      listenRetryTimer = null;
+      startServer(port);
+    }, delay);
   });
 
-  httpServer.listen(PORT, onListenSuccess);
+  httpServer.listen(port, onListenSuccess);
 }
 
-tryListen();
+startServer(PORT);
 
 export { app, io, httpServer };
