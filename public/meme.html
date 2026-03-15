@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Meme Pressure Index (MPI)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style> body { background-color: #0f172a; } </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen p-4 md:p-6">
+  <div class="max-w-5xl mx-auto space-y-6">
+    <header class="border-b border-slate-600 pb-4 flex items-center justify-between flex-wrap gap-2">
+      <div>
+        <h1 class="text-xl font-bold text-slate-100">Meme Pressure Index (MPI)</h1>
+        <p class="text-slate-400 text-sm mt-0.5">BTC · ETH · SOL · XRP (무료 API 기반)</p>
+      </div>
+      <nav id="nav-area" class="flex gap-3 text-sm">
+        <a href="/" class="text-slate-400 hover:text-slate-200">메인</a>
+        <span class="text-amber-400 font-medium">MPI 상세</span>
+        <a href="/meme/diagnostics" class="text-slate-400 hover:text-slate-200">진단</a>
+        <a href="/meme/regime" class="text-slate-400 hover:text-slate-200">Regime</a>
+        <a href="/stats" class="text-slate-400 hover:text-slate-200">수익률 통계</a>
+        <a href="/settings" class="text-slate-400 hover:text-slate-200">설정</a>
+      </nav>
+    </header>
+
+    <div class="text-slate-400 text-sm flex flex-wrap gap-4">
+      <span>마지막 업데이트: <strong id="last-update" class="text-slate-200">—</strong></span>
+      <span>캐시: <strong id="cache-status" class="text-slate-200">—</strong></span>
+    </div>
+
+    <section class="bg-slate-800 rounded-lg border border-slate-700 overflow-hidden">
+      <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider p-4 pb-2">MPI 지수 해석 가이드</h2>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm text-left text-slate-300">
+          <thead class="text-slate-400 border-b border-slate-700">
+            <tr>
+              <th class="p-3">점수 구간</th>
+              <th class="p-3">의미</th>
+              <th class="p-3">대응 전략</th>
+            </tr>
+          </thead>
+          <tbody id="mpi-guide-table-body">
+            <tr class="border-b border-slate-700 bg-red-900/20" data-range="80-100">
+              <td class="p-3 font-bold text-red-400">80 ~ 100</td>
+              <td class="p-3">과열 (Extreme Hype)</td>
+              <td class="p-3 mpi-strategy">대중의 광기 단계. 단기 고점 확률 높음. '약화 청산' 준비.</td>
+            </tr>
+            <tr class="border-b border-slate-700 bg-emerald-900/20" data-range="50-80">
+              <td class="p-3 font-bold text-emerald-400">50 ~ 80</td>
+              <td class="p-3">추세 강화 (Bullish)</td>
+              <td class="p-3 mpi-strategy">유의미한 관심 상승. 강력한 매수 신호 활용.</td>
+            </tr>
+            <tr class="border-b border-slate-700 bg-slate-700/30" data-range="20-50">
+              <td class="p-3 font-bold text-slate-400">20 ~ 50</td>
+              <td class="p-3">관심 저조 (Quiet)</td>
+              <td class="p-3 mpi-strategy">시장 소외 및 횡보장. 스캘핑 효율 낮음.</td>
+            </tr>
+            <tr class="border-b border-slate-700 bg-blue-900/20" data-range="0-20">
+              <td class="p-3 font-bold text-blue-400">0 ~ 20</td>
+              <td class="p-3">냉각 (Fear/Dead)</td>
+              <td class="p-3 mpi-strategy">극도의 공포. 역발상 매수 기회 혹은 하락 지속.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">MPI · mpi_velocity</h2>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div id="card-BTC" class="bg-slate-800 rounded-lg p-4 border border-slate-700 cursor-pointer hover:border-amber-500/50 transition-colors" data-symbol="BTC" title="클릭 시 대응 전략 모달">
+          <div class="text-slate-400 text-xs">BTC</div>
+          <div class="flex items-baseline gap-2 flex-wrap mt-1">
+            <span id="mpi-BTC" class="text-2xl font-bold text-amber-400">—</span>
+            <span id="badge-BTC" class="text-xs font-medium"></span>
+          </div>
+          <div id="vel-BTC" class="text-sm text-slate-400 mt-0.5">velocity —</div>
+          <div id="regime-BTC" class="text-xs text-slate-500 mt-1">regime —</div>
+          <div id="severity-BTC" class="text-xs mt-0.5"></div>
+        </div>
+        <div id="card-ETH" class="bg-slate-800 rounded-lg p-4 border border-slate-700 cursor-pointer hover:border-amber-500/50 transition-colors" data-symbol="ETH" title="클릭 시 대응 전략 모달">
+          <div class="text-slate-400 text-xs">ETH</div>
+          <div class="flex items-baseline gap-2 flex-wrap mt-1">
+            <span id="mpi-ETH" class="text-2xl font-bold text-amber-400">—</span>
+            <span id="badge-ETH" class="text-xs font-medium"></span>
+          </div>
+          <div id="vel-ETH" class="text-sm text-slate-400 mt-0.5">velocity —</div>
+          <div id="regime-ETH" class="text-xs text-slate-500 mt-1">regime —</div>
+          <div id="severity-ETH" class="text-xs mt-0.5"></div>
+        </div>
+        <div id="card-SOL" class="bg-slate-800 rounded-lg p-4 border border-slate-700 cursor-pointer hover:border-amber-500/50 transition-colors" data-symbol="SOL" title="클릭 시 대응 전략 모달">
+          <div class="text-slate-400 text-xs">SOL</div>
+          <div class="flex items-baseline gap-2 flex-wrap mt-1">
+            <span id="mpi-SOL" class="text-2xl font-bold text-amber-400">—</span>
+            <span id="badge-SOL" class="text-xs font-medium"></span>
+          </div>
+          <div id="vel-SOL" class="text-sm text-slate-400 mt-0.5">velocity —</div>
+          <div id="regime-SOL" class="text-xs text-slate-500 mt-1">regime —</div>
+          <div id="severity-SOL" class="text-xs mt-0.5"></div>
+        </div>
+        <div id="card-XRP" class="bg-slate-800 rounded-lg p-4 border border-slate-700 cursor-pointer hover:border-amber-500/50 transition-colors" data-symbol="XRP" title="클릭 시 대응 전략 모달">
+          <div class="text-slate-400 text-xs">XRP</div>
+          <div class="flex items-baseline gap-2 flex-wrap mt-1">
+            <span id="mpi-XRP" class="text-2xl font-bold text-amber-400">—</span>
+            <span id="badge-XRP" class="text-xs font-medium"></span>
+          </div>
+          <div id="vel-XRP" class="text-sm text-slate-400 mt-0.5">velocity —</div>
+          <div id="regime-XRP" class="text-xs text-slate-500 mt-1">regime —</div>
+          <div id="severity-XRP" class="text-xs mt-0.5"></div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">컴포넌트 (Social · Trend · News · OI · Funding) — 게이지</h2>
+      <div id="comp-gauges" class="space-y-4"></div>
+    </section>
+
+    <section>
+      <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">컴포넌트 수치 (S T N O F)</h2>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm text-left text-slate-300 border border-slate-700 rounded-lg overflow-hidden">
+          <thead class="bg-slate-800 text-slate-400">
+            <tr>
+              <th class="p-2">Symbol</th>
+              <th class="p-2">S (Reddit)</th>
+              <th class="p-2">T (Trend)</th>
+              <th class="p-2">N (News)</th>
+              <th class="p-2">O (OI)</th>
+              <th class="p-2">F (Funding)</th>
+            </tr>
+          </thead>
+          <tbody id="comp-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">최근 15분 MPI 시계열</h2>
+      <div class="overflow-x-auto max-h-64 overflow-y-auto">
+        <table class="w-full text-sm text-left text-slate-300 border border-slate-700 rounded-lg">
+          <thead class="bg-slate-800 text-slate-400 sticky top-0">
+            <tr>
+              <th class="p-2">시간</th>
+              <th class="p-2">BTC</th>
+              <th class="p-2">ETH</th>
+              <th class="p-2">SOL</th>
+              <th class="p-2">XRP</th>
+            </tr>
+          </thead>
+          <tbody id="history-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <div id="mpi-guide-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/60 p-4" style="display: none;">
+    <div class="bg-slate-800 rounded-xl border border-slate-700 shadow-2xl p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
+      <h3 class="text-lg font-bold text-amber-400 mb-3">MPI 점수 해석 가이드</h3>
+      <p id="mpi-modal-subtitle" class="text-slate-400 text-sm mb-3"></p>
+      <div class="overflow-x-auto border border-slate-700 rounded-lg">
+        <table class="w-full text-sm text-left text-slate-300">
+          <thead class="bg-slate-700/50 text-slate-400">
+            <tr>
+              <th class="p-2">점수 구간</th>
+              <th class="p-2">의미</th>
+              <th class="p-2">대응 전략</th>
+            </tr>
+          </thead>
+          <tbody id="mpi-modal-table-body">
+            <tr class="border-t border-slate-700 mpi-modal-row" data-range="80-100">
+              <td class="p-2 font-bold text-red-400">80 ~ 100</td>
+              <td class="p-2">과열 (Extreme Hype)</td>
+              <td class="p-2 font-medium text-slate-200 mpi-modal-strategy">대중의 광기 단계. 단기 고점 확률 높음. '약화 청산' 준비.</td>
+            </tr>
+            <tr class="border-t border-slate-700 mpi-modal-row" data-range="50-80">
+              <td class="p-2 font-bold text-emerald-400">50 ~ 80</td>
+              <td class="p-2">추세 강화 (Bullish)</td>
+              <td class="p-2 font-medium text-slate-200 mpi-modal-strategy">유의미한 관심 상승. 강력한 매수 신호 활용.</td>
+            </tr>
+            <tr class="border-t border-slate-700 mpi-modal-row" data-range="20-50">
+              <td class="p-2 font-bold text-slate-400">20 ~ 50</td>
+              <td class="p-2">관심 저조 (Quiet)</td>
+              <td class="p-2 font-medium text-slate-200 mpi-modal-strategy">시장 소외 및 횡보장. 스캘핑 효율 낮음.</td>
+            </tr>
+            <tr class="border-t border-slate-700 mpi-modal-row" data-range="0-20">
+              <td class="p-2 font-bold text-blue-400">0 ~ 20</td>
+              <td class="p-2">냉각 (Fear/Dead)</td>
+              <td class="p-2 font-medium text-slate-200 mpi-modal-strategy">극도의 공포. 역발상 매수 기회 혹은 하락 지속.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="text-slate-500 text-xs mt-3">MPI = Social(Reddit) + Trend + News + OI − Funding 가중 조합</p>
+      <div class="mt-4 flex justify-end">
+        <button type="button" id="mpi-guide-close" class="px-4 py-2 rounded-lg bg-slate-600 hover:bg-slate-500 text-slate-200 text-sm">닫기</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let MEME_PAGE_ONLY = false;
+    var lastMemeData = null;
+
+    var MPI_RANGES = [
+      { min: 80, max: 100, rangeKey: '80-100', label: '과열', badgeClass: 'text-red-400 bg-red-900/40 border-red-600' },
+      { min: 50, max: 80, rangeKey: '50-80', label: '추세 강화', badgeClass: 'text-emerald-400 bg-emerald-900/40 border-emerald-600' },
+      { min: 20, max: 50, rangeKey: '20-50', label: '관심 저조', badgeClass: 'text-slate-400 bg-slate-700/50 border-slate-600' },
+      { min: 0, max: 20, rangeKey: '0-20', label: '냉각', badgeClass: 'text-blue-400 bg-blue-900/40 border-blue-600' }
+    ];
+
+    function getMpiRange(mpi) {
+      if (mpi == null || mpi === '' || isNaN(Number(mpi))) return null;
+      var n = Number(mpi);
+      for (var i = 0; i < MPI_RANGES.length; i++) {
+        if (n >= MPI_RANGES[i].min && n <= MPI_RANGES[i].max) return MPI_RANGES[i];
+      }
+      if (n >= 80) return MPI_RANGES[0];
+      if (n >= 50) return MPI_RANGES[1];
+      if (n >= 20) return MPI_RANGES[2];
+      return MPI_RANGES[3];
+    }
+
+    function formatTime(ts) {
+      if (!ts) return '—';
+      const d = new Date(ts * 1000);
+      return d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+
+    function render(data) {
+      if (!data) return;
+      lastMemeData = data;
+      if (data.memePageOnly === true && !MEME_PAGE_ONLY) {
+        MEME_PAGE_ONLY = true;
+        var nav = document.getElementById('nav-area');
+        if (nav) nav.innerHTML = '';
+      }
+      document.getElementById('last-update').textContent = data.updatedAt || '—';
+      document.getElementById('cache-status').textContent = data.cacheStatus || '—';
+
+      const regimeBySymbol = data.regimeBySymbol || {};
+      ['BTC', 'ETH', 'SOL', 'XRP'].forEach(sym => {
+        const elMpi = document.getElementById('mpi-' + sym);
+        const elVel = document.getElementById('vel-' + sym);
+        const elBadge = document.getElementById('badge-' + sym);
+        const elRegime = document.getElementById('regime-' + sym);
+        const elSeverity = document.getElementById('severity-' + sym);
+        const point = data.list && data.list.find(p => p.symbol === sym);
+        const mpiVal = point && point.mpi != null ? point.mpi : null;
+        if (elMpi) elMpi.textContent = mpiVal != null ? mpiVal : '—';
+        if (elVel) elVel.textContent = 'velocity ' + (point && point.mpi_velocity != null ? (point.mpi_velocity >= 0 ? '+' : '') + point.mpi_velocity.toFixed(1) : '—');
+        if (elRegime) {
+          const r = regimeBySymbol[sym];
+          elRegime.textContent = r && r.regime ? 'regime ' + r.regime : 'regime —';
+        }
+        if (elSeverity) {
+          var sev = '';
+          if (mpiVal >= 90) sev = 'EXTREME';
+          else if (mpiVal >= 80) sev = 'HIGH';
+          else if (mpiVal >= 70) sev = 'ELEVATED';
+          elSeverity.textContent = sev ? 'signal ' + sev : '';
+          elSeverity.className = 'text-xs mt-0.5 ' + (sev === 'EXTREME' ? 'text-red-400' : sev === 'HIGH' ? 'text-orange-400' : sev === 'ELEVATED' ? 'text-amber-400' : '');
+        }
+        var range = getMpiRange(mpiVal);
+        if (elBadge) {
+          if (range) {
+            elBadge.textContent = range.label;
+            elBadge.className = 'text-xs font-medium px-2 py-0.5 rounded border ' + range.badgeClass;
+            elBadge.style.display = '';
+          } else {
+            elBadge.textContent = '';
+            elBadge.style.display = 'none';
+          }
+        }
+      });
+
+      const compGauges = document.getElementById('comp-gauges');
+      if (compGauges && data.list) {
+        const labels = { S: 'Social (Reddit)', T: 'Trend', N: 'News', O: 'OI', F: 'Funding' };
+        compGauges.innerHTML = data.list.map(p => {
+          const c = p.components || {};
+          const items = ['S', 'T', 'N', 'O', 'F'].map(key => {
+            const v = c[key] != null ? Math.min(1, Math.max(0, c[key])) : 0;
+            const pct = Math.round(v * 100);
+            return '<div class="flex items-center gap-2"><span class="w-24 text-slate-400 text-xs">' + (labels[key] || key) + '</span><div class="flex-1 h-2 bg-slate-700 rounded overflow-hidden"><div class="h-full bg-amber-500 rounded transition-all" style="width:' + pct + '%"></div></div><span class="text-slate-400 text-xs w-8">' + pct + '%</span></div>';
+          }).join('');
+          return '<div class="bg-slate-800 rounded-lg p-3 border border-slate-700"><div class="text-amber-400 font-medium text-sm mb-2">' + p.symbol + '</div><div class="space-y-1.5">' + items + '</div></div>';
+        }).join('');
+      }
+
+      const compBody = document.getElementById('comp-body');
+      if (compBody && data.list) {
+        compBody.innerHTML = data.list.map(p => {
+          const c = p.components || {};
+          return '<tr class="border-t border-slate-700"><td class="p-2">' + p.symbol + '</td><td class="p-2">' + (c.S != null ? c.S.toFixed(2) : '—') + '</td><td class="p-2">' + (c.T != null ? c.T.toFixed(2) : '—') + '</td><td class="p-2">' + (c.N != null ? c.N.toFixed(2) : '—') + '</td><td class="p-2">' + (c.O != null ? c.O.toFixed(2) : '—') + '</td><td class="p-2">' + (c.F != null ? c.F.toFixed(2) : '—') + '</td></tr>';
+        }).join('');
+      }
+
+      const historyBySym = data.historyBySymbol || {};
+      const historyBody = document.getElementById('history-body');
+      if (historyBody) {
+        const syms = ['BTC', 'ETH', 'SOL', 'XRP'];
+        const maxLen = Math.max(0, ...syms.map(s => (historyBySym[s] || []).length));
+        if (maxLen === 0) {
+          historyBody.innerHTML = '<tr><td colspan="5" class="p-2 text-slate-500">데이터 수집 중…</td></tr>';
+        } else {
+          const rows = [];
+          const n = Math.min(15, maxLen);
+          for (let i = n - 1; i >= 0; i--) {
+            const idx = maxLen - n + i;
+            const pt = (historyBySym.BTC || [])[idx] || (historyBySym.ETH || [])[idx];
+            const ts = pt?.timestamp ?? (pt?.ts ? Math.floor(pt.ts / 1000) : null);
+            const cells = syms.map(sym => {
+              const pts = historyBySym[sym] || [];
+              const p = pts[idx];
+              return p ? p.mpi : '—';
+            });
+            rows.push('<tr class="border-t border-slate-700"><td class="p-2">' + formatTime(ts) + '</td><td class="p-2">' + cells[0] + '</td><td class="p-2">' + cells[1] + '</td><td class="p-2">' + cells[2] + '</td><td class="p-2">' + cells[3] + '</td></tr>');
+          }
+          historyBody.innerHTML = rows.join('');
+        }
+      }
+    }
+
+    function fetchData() {
+      fetch('/api/meme/mpi')
+        .then(r => r.json())
+        .then(data => render(data))
+        .catch(() => render(null));
+    }
+
+    var modal = document.getElementById('mpi-guide-modal');
+    var btnClose = document.getElementById('mpi-guide-close');
+    var modalSubtitle = document.getElementById('mpi-modal-subtitle');
+    var modalRows = document.querySelectorAll ? document.querySelectorAll('.mpi-modal-row') : [];
+
+    function openMpiGuide(highlightMpi, symbol) {
+      if (!modal) return;
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+      modal.style.display = 'flex';
+      var rangeKey = null;
+      if (highlightMpi != null && !isNaN(Number(highlightMpi))) {
+        var r = getMpiRange(Number(highlightMpi));
+        if (r) rangeKey = r.rangeKey;
+      }
+      for (var i = 0; i < modalRows.length; i++) {
+        var row = modalRows[i];
+        var isMatch = rangeKey && row.getAttribute('data-range') === rangeKey;
+        row.classList.remove('ring-2', 'ring-amber-400', 'bg-amber-900/30');
+        if (isMatch) {
+          row.classList.add('ring-2', 'ring-amber-400', 'bg-amber-900/30');
+        }
+      }
+      if (modalSubtitle) {
+        modalSubtitle.textContent = (symbol && rangeKey) ? (symbol + ' MPI ' + highlightMpi + ' → 해당 구간 대응 전략') : '';
+      }
+    }
+    function closeMpiGuide() {
+      if (modal) {
+        modal.classList.add('hidden');
+        modal.style.display = 'none';
+      }
+    }
+    ['BTC', 'ETH', 'SOL', 'XRP'].forEach(sym => {
+      var card = document.getElementById('card-' + sym);
+      if (card) {
+        card.addEventListener('click', function () {
+          var mpi = lastMemeData && lastMemeData.list ? (lastMemeData.list.find(function (p) { return p.symbol === sym; }) || {}).mpi : null;
+          openMpiGuide(mpi != null ? mpi : undefined, sym);
+        });
+      }
+    });
+    if (btnClose) btnClose.addEventListener('click', closeMpiGuide);
+    if (modal) modal.addEventListener('click', function (e) { if (e.target === modal) closeMpiGuide(); });
+
+    fetchData();
+    setInterval(fetchData, 10000);
+  </script>
+</body>
+</html>

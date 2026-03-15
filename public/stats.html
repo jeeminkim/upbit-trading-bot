@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>투자내역 · 스캘핑 HTS</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { background-color: #0f172a; }
+    .chart-wrap { position: relative; height: 280px; }
+    .tab-active { border-bottom: 2px solid rgb(245 158 11); color: rgb(245 158 11); }
+    .tab-inactive { border-bottom: 2px solid transparent; color: #94a3b8; }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen">
+  <div class="max-w-4xl mx-auto pb-8">
+    <!-- 헤더 네비 -->
+    <header class="sticky top-0 z-10 bg-slate-900/95 border-b border-slate-700 px-4 py-3 flex items-center justify-between">
+      <h1 class="text-lg font-bold text-slate-100">투자내역</h1>
+      <nav class="flex gap-4 text-sm">
+        <a href="/" class="text-slate-400 hover:text-slate-200">메인</a>
+        <a href="/meme" class="text-slate-400 hover:text-slate-200">MPI 상세</a>
+        <span class="text-amber-400 font-medium">수익률 통계</span>
+        <a href="/settings" class="text-slate-400 hover:text-slate-200">설정</a>
+      </nav>
+    </header>
+
+    <!-- 상단 요약: 다크 네이비 -->
+    <section class="bg-[#151b29] rounded-b-2xl px-5 pt-6 pb-6 mb-4">
+      <div class="flex flex-col gap-4">
+        <div class="flex justify-between items-end">
+          <div>
+            <p class="text-slate-400 text-sm">보유 KRW</p>
+            <p id="summary-krw" class="text-2xl font-bold text-slate-100 mt-0.5">—</p>
+          </div>
+          <div class="text-right">
+            <p class="text-slate-400 text-sm">총 보유자산</p>
+            <p id="summary-total" class="text-2xl font-bold text-amber-400 mt-0.5">—</p>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+          <div class="flex justify-between">
+            <span class="text-slate-500">총매수</span>
+            <span id="summary-buy" class="text-slate-200 font-medium">—</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-slate-500">총평가</span>
+            <span id="summary-eval" class="text-slate-200 font-medium">—</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-slate-500">평가손익</span>
+            <span id="summary-pnl" class="font-medium">—</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-slate-500">수익률</span>
+            <span id="summary-rate" class="font-medium">—</span>
+          </div>
+          <div class="flex justify-between col-span-2">
+            <span class="text-slate-500">주문가능</span>
+            <span id="summary-orderable" class="text-emerald-400 font-medium">—</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 탭 -->
+    <div class="px-4">
+      <div class="flex border-b border-slate-700 mb-4">
+        <button type="button" id="tab-holdings" class="tab-active flex-1 py-3 text-sm font-medium transition-colors" data-tab="holdings">보유자산</button>
+        <button type="button" id="tab-profit" class="tab-inactive flex-1 py-3 text-sm font-medium transition-colors" data-tab="profit">투자손익</button>
+        <button type="button" id="tab-history" class="tab-inactive flex-1 py-3 text-sm font-medium transition-colors" data-tab="history">거래내역</button>
+      </div>
+
+      <!-- 패널: 보유자산 -->
+      <div id="panel-holdings" class="panel space-y-3">
+        <div id="holdings-list" class="space-y-2 min-h-[200px]">
+          <!-- JS로 채움: 자산 행 또는 빈 메시지 -->
+        </div>
+      </div>
+
+      <!-- 패널: 투자손익 -->
+      <div id="panel-profit" class="panel hidden">
+        <div class="grid grid-cols-2 md:grid-cols-3 gap-3 mb-6">
+          <div class="bg-slate-800 rounded-lg p-3 border border-slate-700">
+            <p class="text-slate-400 text-xs uppercase tracking-wider">승률</p>
+            <p id="stat-win-rate" class="text-lg font-bold text-emerald-400 mt-0.5">— %</p>
+            <p id="stat-wins" class="text-xs text-slate-500">—</p>
+          </div>
+          <div class="bg-slate-800 rounded-lg p-3 border border-slate-700">
+            <p class="text-slate-400 text-xs uppercase tracking-wider">총 수익금</p>
+            <p id="stat-cumulative" class="text-lg font-bold mt-0.5">—</p>
+          </div>
+          <div class="bg-slate-800 rounded-lg p-3 border border-slate-700">
+            <p class="text-slate-400 text-xs uppercase tracking-wider">MDD (%)</p>
+            <p id="stat-mdd" class="text-lg font-bold text-red-400 mt-0.5">—</p>
+          </div>
+          <div class="bg-slate-800 rounded-lg p-3 border border-slate-700">
+            <p class="text-slate-400 text-xs uppercase tracking-wider">평균 보유(초)</p>
+            <p id="stat-hold" class="text-lg font-bold text-slate-200 mt-0.5">—</p>
+          </div>
+          <div class="bg-slate-800 rounded-lg p-3 border border-slate-700">
+            <p class="text-slate-400 text-xs uppercase tracking-wider">총 수수료</p>
+            <p id="stat-fee" class="text-lg font-bold text-slate-300 mt-0.5">—</p>
+          </div>
+          <div class="bg-slate-800 rounded-lg p-3 border border-slate-700">
+            <p class="text-slate-400 text-xs uppercase tracking-wider">전체 거래</p>
+            <p id="stat-total" class="text-lg font-bold text-slate-200 mt-0.5">— 건</p>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div class="bg-slate-800 rounded-lg border border-slate-700 overflow-hidden p-4">
+            <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">시간대별 승률</h2>
+            <div class="chart-wrap"><canvas id="chart-hourly"></canvas></div>
+          </div>
+          <div class="bg-slate-800 rounded-lg border border-slate-700 overflow-hidden p-4">
+            <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">코인별 수익 비중</h2>
+            <div class="chart-wrap"><canvas id="chart-ticker"></canvas></div>
+          </div>
+          <div class="bg-slate-800 rounded-lg border border-slate-700 overflow-hidden p-4">
+            <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">청산 사유</h2>
+            <div class="chart-wrap"><canvas id="chart-exit"></canvas></div>
+          </div>
+          <div class="bg-slate-800 rounded-lg border border-slate-700 overflow-hidden p-4">
+            <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">날짜별 수익금</h2>
+            <div class="chart-wrap"><canvas id="chart-daily"></canvas></div>
+          </div>
+        </div>
+        <div class="bg-slate-800 rounded-lg border border-slate-700 overflow-hidden p-4 mt-4">
+          <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">전략별 성과 (strategy_id)</h2>
+          <p class="text-slate-500 text-xs mb-3">설정 저장 시마다 전략이 기록되며, 매도 시 해당 전략 ID와 연결됩니다. 어떤 가중치 조합이 높은 성과를 냈는지 비교하세요.</p>
+          <div id="strategy-stats-list" class="overflow-x-auto">
+            <table class="w-full text-sm text-slate-300">
+              <thead>
+                <tr class="border-b border-slate-600 text-left">
+                  <th class="py-2 pr-4">전략 ID</th>
+                  <th class="py-2 pr-4">거래 수</th>
+                  <th class="py-2 pr-4">승률 (%)</th>
+                  <th class="py-2 pr-4">평균 수익률 (%)</th>
+                  <th class="py-2 pr-4">MDD (%)</th>
+                </tr>
+              </thead>
+              <tbody id="strategy-stats-tbody"></tbody>
+            </table>
+            <p id="strategy-stats-empty" class="text-slate-500 text-sm py-4 hidden">기록된 전략이 없습니다.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- 패널: 거래내역 -->
+      <div id="panel-history" class="panel hidden overflow-x-auto">
+        <div class="min-w-[480px]">
+          <div class="grid grid-cols-[4rem_1fr_5rem_5.5rem_4rem_6.5rem] gap-2 px-4 py-2 text-slate-500 text-xs border-b border-slate-700 mb-2">
+            <span>구분</span>
+            <span>코인명</span>
+            <span>체결시간</span>
+            <span class="text-right">체결가</span>
+            <span class="text-right">수량</span>
+            <span class="text-right">정산금액</span>
+          </div>
+          <div id="history-list" class="space-y-1 min-h-[200px]">
+            <!-- JS: 매수/매도 리스트 -->
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <p class="text-slate-500 text-xs text-center mt-6">trades.db · 새로고침 시 갱신</p>
+  </div>
+
+  <script>
+    Chart.defaults.color = '#94a3b8';
+    Chart.defaults.borderColor = '#334155';
+
+    function formatKrw(num) {
+      if (num == null) return '—';
+      return new Intl.NumberFormat('ko-KR').format(Math.round(num)) + ' 원';
+    }
+    function formatPct(num) {
+      if (num == null) return '—';
+      var s = num >= 0 ? '+' : '';
+      return s + Number(num).toFixed(2) + ' %';
+    }
+    function formatTime(iso) {
+      if (!iso) return '—';
+      var d = new Date(iso);
+      return d.toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    }
+
+    var charts = { daily: null, hourly: null, ticker: null, exit: null };
+    var currentTab = 'holdings';
+
+    /** 보유 KRW 제외: 평가손익/수익률은 코인만. 0원이면 +0.00% 회색, 상승=빨강/하락=파랑 */
+    function setSummary(assets) {
+      if (!assets) {
+        document.getElementById('summary-krw').textContent = '—';
+        document.getElementById('summary-total').textContent = '—';
+        document.getElementById('summary-buy').textContent = '—';
+        document.getElementById('summary-eval').textContent = '—';
+        document.getElementById('summary-pnl').textContent = '—';
+        document.getElementById('summary-rate').textContent = '—';
+        document.getElementById('summary-orderable').textContent = '—';
+        return;
+      }
+      var buyCoins = Math.floor(Number(assets.totalBuyKrwForCoins != null ? assets.totalBuyKrwForCoins : (assets.totalBuyKrw || 0)));
+      var evalCoins = Math.floor(Number(assets.evaluationKrwForCoins != null ? assets.evaluationKrwForCoins : (assets.totalEvaluationKrw || 0)));
+      var pnl = evalCoins - buyCoins;
+      var rate = buyCoins > 0 ? (pnl / buyCoins) * 100 : 0;
+      var totalEval = assets.totalEvaluationKrw != null ? assets.totalEvaluationKrw : 0;
+      var orderable = Math.floor(Number(assets.orderableKrw || 0));
+      document.getElementById('summary-krw').textContent = formatKrw(orderable);
+      document.getElementById('summary-total').textContent = formatKrw(Math.floor(Number(totalEval)));
+      document.getElementById('summary-buy').textContent = formatKrw(buyCoins);
+      document.getElementById('summary-eval').textContent = formatKrw(evalCoins);
+      var pnlEl = document.getElementById('summary-pnl');
+      pnlEl.textContent = (pnl >= 0 ? '+' : '') + formatKrw(pnl);
+      pnlEl.className = 'font-medium ' + (pnl > 0 ? 'text-red-400' : pnl < 0 ? 'text-blue-400' : 'text-slate-400');
+      var rateEl = document.getElementById('summary-rate');
+      rateEl.textContent = (rate >= 0 ? '+' : '') + rate.toFixed(2) + ' %';
+      rateEl.className = 'font-medium ' + (rate > 0 ? 'text-red-400' : rate < 0 ? 'text-blue-400' : 'text-slate-400');
+      document.getElementById('summary-orderable').textContent = formatKrw(orderable);
+    }
+
+    function switchTab(tab) {
+      currentTab = tab;
+      ['holdings', 'profit', 'history'].forEach(function (t) {
+        var panel = document.getElementById('panel-' + t);
+        var btn = document.querySelector('[data-tab="' + t + '"]');
+        if (panel) panel.classList.toggle('hidden', t !== tab);
+        if (btn) {
+          btn.classList.toggle('tab-active', t === tab);
+          btn.classList.toggle('tab-inactive', t !== tab);
+        }
+      });
+      if (tab === 'holdings') fetchHoldings();
+      if (tab === 'history') fetchHistory();
+    }
+
+    function renderHoldings(list) {
+      var container = document.getElementById('holdings-list');
+      if (!container) return;
+      if (!list || list.length === 0) {
+        container.innerHTML = '<p class="text-slate-500 text-center py-12">현재 보유 중인 자산이 없습니다.</p>';
+        return;
+      }
+      container.innerHTML = list.map(function (row) {
+        var name = row.currency || '—';
+        var evalStr = formatKrw(row.evalKrw);
+        return '<div class="flex items-center justify-between py-3 px-4 bg-slate-800 rounded-lg border border-slate-700">' +
+          '<div><p class="font-medium text-slate-100">' + escapeHtml(name) + '</p><p class="text-slate-500 text-xs mt-0.5">' + (row.balance != null ? Number(row.balance) : '—') + ' ' + name + '</p></div>' +
+          '<div class="text-right"><p class="text-slate-200 font-medium">' + evalStr + '</p><p class="text-slate-500 text-xs mt-0.5">' + (row.tradePrice != null ? '평가단가 ' + formatKrw(row.tradePrice) : '') + '</p></div>' +
+          '</div>';
+      }).join('');
+    }
+
+    function renderHistory(trades) {
+      var container = document.getElementById('history-list');
+      if (!container) return;
+      if (!trades || trades.length === 0) {
+        container.innerHTML = '<p class="text-slate-500 text-center py-12">거래 내역이 없습니다.</p>';
+        return;
+      }
+      container.innerHTML = trades.map(function (t) {
+        var side = (t.side || '').toLowerCase();
+        var isBuy = side === 'buy';
+        var sideLabel = isBuy ? '매수' : '매도';
+        var sideCls = isBuy ? 'text-emerald-400' : 'text-blue-400';
+        var ticker = t.ticker || '—';
+        var price = t.price != null ? formatKrw(t.price) : '—';
+        var qty = t.quantity != null ? t.quantity : '—';
+        var amount = t.price != null && t.quantity != null ? formatKrw(t.price * t.quantity) : '—';
+        return '<div class="grid grid-cols-[4rem_1fr_5rem_5.5rem_4rem_6.5rem] gap-2 items-center py-3 px-4 bg-slate-800 rounded-lg border border-slate-700 text-sm">' +
+          '<span class="font-medium ' + sideCls + ' w-12">' + sideLabel + '</span>' +
+          '<span class="text-slate-200 truncate">' + escapeHtml(ticker) + '</span>' +
+          '<span class="text-slate-500 text-xs">' + formatTime(t.timestamp) + '</span>' +
+          '<span class="text-slate-200 text-right">' + price + '</span>' +
+          '<span class="text-slate-300 text-right">' + qty + '</span>' +
+          '<span class="text-slate-200 font-medium text-right">' + amount + '</span>' +
+          '</div>';
+      }).join('');
+    }
+
+    function escapeHtml(s) {
+      var div = document.createElement('div');
+      div.textContent = s;
+      return div.innerHTML;
+    }
+
+    function renderStats(stats) {
+      if (!stats) return;
+      var cumEl = document.getElementById('stat-cumulative');
+      cumEl.textContent = formatKrw(stats.cumulativeRevenue);
+      cumEl.className = 'text-lg font-bold mt-0.5 ' + (stats.cumulativeRevenue > 0 ? 'text-emerald-400' : stats.cumulativeRevenue < 0 ? 'text-red-400' : 'text-slate-300');
+      document.getElementById('stat-win-rate').textContent = (stats.winRate != null ? Number(stats.winRate).toFixed(1) : '—') + ' %';
+      document.getElementById('stat-wins').textContent = (stats.winCount != null ? stats.winCount : '—') + ' / ' + (stats.totalTrades || 0) + ' 건';
+      document.getElementById('stat-mdd').textContent = stats.mddPct != null ? Number(stats.mddPct).toFixed(2) + ' %' : '—';
+      document.getElementById('stat-hold').textContent = stats.avgHoldSeconds != null ? Math.round(stats.avgHoldSeconds) + ' 초' : '—';
+      document.getElementById('stat-fee').textContent = formatKrw(stats.totalFee);
+      document.getElementById('stat-total').textContent = (stats.totalTrades != null ? stats.totalTrades : '—') + ' 건';
+
+      var days = stats.dailyProfits || [];
+      if (charts.daily) charts.daily.destroy();
+      charts.daily = new Chart(document.getElementById('chart-daily'), {
+        type: 'line',
+        data: {
+          labels: days.map(function (d) { return d.day; }),
+          datasets: [{ label: '일별 수익금 (원)', data: days.map(function (d) { return d.daily_profit != null ? d.daily_profit : 0; }), borderColor: 'rgb(52, 211, 153)', backgroundColor: 'rgba(52, 211, 153, 0.1)', fill: true, tension: 0.2 }]
+        },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: true } }, scales: { x: { ticks: { maxRotation: 45 } } } }
+      });
+
+      var hourly = stats.hourlyWinRate || [];
+      var hourLabels = hourly.length ? hourly.map(function (h) { return h.hour + '시'; }) : Array.from({ length: 24 }, function (_, i) { return i + '시'; });
+      var hourData = Array(24).fill(0);
+      hourly.forEach(function (h) { if (h.hour >= 0 && h.hour < 24) hourData[h.hour] = h.winRate != null ? h.winRate : 0; });
+      if (charts.hourly) charts.hourly.destroy();
+      charts.hourly = new Chart(document.getElementById('chart-hourly'), {
+        type: 'bar',
+        data: { labels: hourLabels, datasets: [{ label: '승률 (%)', data: hourData, backgroundColor: 'rgba(52, 211, 153, 0.6)', borderColor: 'rgb(52, 211, 153)', borderWidth: 1 }] },
+        options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 100 } } }
+      });
+
+      var byTicker = stats.profitByTicker || [];
+      if (charts.ticker) charts.ticker.destroy();
+      if (byTicker.length === 0) {
+        var ctx = document.getElementById('chart-ticker');
+        if (ctx && ctx.getContext) ctx.getContext('2d').clearRect(0, 0, 999, 999);
+      } else {
+        var colors = ['#34d399', '#60a5fa', '#f59e0b', '#a78bfa', '#f472b6'];
+        charts.ticker = new Chart(document.getElementById('chart-ticker'), {
+          type: 'pie',
+          data: {
+            labels: byTicker.map(function (t) { return (t.ticker || '') + ' ' + (t.profit != null ? formatKrw(t.profit) : ''); }),
+            datasets: [{ data: byTicker.map(function (t) { return t.profit != null ? t.profit : 0; }), backgroundColor: byTicker.map(function (_, i) { return colors[i % colors.length]; }) }]
+          },
+          options: { responsive: true, maintainAspectRatio: false }
+        });
+      }
+
+      var byReason = stats.exitReasonCounts || [];
+      if (charts.exit) charts.exit.destroy();
+      if (byReason.length === 0) {
+        var ctxExit = document.getElementById('chart-exit');
+        if (ctxExit && ctxExit.getContext) ctxExit.getContext('2d').clearRect(0, 0, 999, 999);
+      } else {
+        var reasonColors = ['#ef4444', '#f59e0b', '#3b82f6', '#10b981', '#8b5cf6'];
+        charts.exit = new Chart(document.getElementById('chart-exit'), {
+          type: 'doughnut',
+          data: {
+            labels: byReason.map(function (r) { return (r.reason || '기타') + ' (' + (r.count || 0) + ')'; }),
+            datasets: [{ data: byReason.map(function (r) { return r.count || 0; }), backgroundColor: byReason.map(function (_, i) { return reasonColors[i % reasonColors.length]; }) }]
+          },
+          options: { responsive: true, maintainAspectRatio: false }
+        });
+      }
+    }
+
+    function renderStrategyStats(list) {
+      var tbody = document.getElementById('strategy-stats-tbody');
+      var emptyEl = document.getElementById('strategy-stats-empty');
+      if (!tbody) return;
+      if (!list || list.length === 0) {
+        if (emptyEl) { emptyEl.classList.remove('hidden'); }
+        tbody.innerHTML = '';
+        return;
+      }
+      if (emptyEl) emptyEl.classList.add('hidden');
+      tbody.innerHTML = list.map(function (s) {
+        var winRate = s.winRate != null ? s.winRate.toFixed(1) : '—';
+        var avgRet = s.avgReturn != null ? (s.avgReturn >= 0 ? '+' : '') + s.avgReturn.toFixed(2) : '—';
+        var mdd = s.mddPct != null ? s.mddPct.toFixed(2) : '—';
+        return '<tr class="border-b border-slate-700"><td class="py-2 pr-4">' + s.strategy_id + '</td><td class="py-2 pr-4">' + (s.total || 0) + '</td><td class="py-2 pr-4">' + winRate + '</td><td class="py-2 pr-4">' + avgRet + '</td><td class="py-2 pr-4">' + mdd + '</td></tr>';
+      }).join('');
+    }
+
+    function fetchStrategyStats() {
+      fetch('/api/strategy-stats')
+        .then(function (r) { return r.json(); })
+        .then(renderStrategyStats)
+        .catch(function () { renderStrategyStats([]); });
+    }
+
+    function fetchStats() {
+      fetch('/api/stats')
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          setSummary(data.assets || null);
+          renderStats(data);
+        })
+        .catch(function () {
+          setSummary(null);
+          renderStats({ winRate: 0, cumulativeRevenue: 0, totalTrades: 0, dailyProfits: [], hourlyWinRate: [], profitByTicker: [], exitReasonCounts: [] });
+        });
+      fetchStrategyStats();
+    }
+
+    function fetchHoldings() {
+      fetch('/api/accounts')
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.assets) setSummary(data.assets);
+          renderHoldings(data.list || []);
+        })
+        .catch(function () { renderHoldings([]); });
+    }
+
+    function fetchHistory() {
+      fetch('/api/trades?limit=50')
+        .then(function (r) { return r.json(); })
+        .then(renderHistory)
+        .catch(function () { renderHistory([]); });
+    }
+
+    document.querySelectorAll('[data-tab]').forEach(function (btn) {
+      btn.addEventListener('click', function () { switchTab(this.getAttribute('data-tab')); });
+    });
+
+    fetchStats();
+    fetchHoldings();
+
+    setInterval(fetchStats, 15000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>전략 오케스트레이터</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <style> body { background-color: #0f172a; } </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen p-4 md:p-6">
+  <div class="max-w-5xl mx-auto space-y-6">
+    <header class="border-b border-slate-600 pb-4 flex items-center justify-between flex-wrap gap-2">
+      <div>
+        <h1 class="text-xl font-bold text-slate-100">전략 오케스트레이터</h1>
+        <p class="text-slate-400 text-sm mt-0.5">SCALP vs REGIME 병렬 평가 · 최종 진입 1건만 실행</p>
+      </div>
+      <nav class="flex gap-3 text-sm">
+        <a href="/" class="text-slate-400 hover:text-slate-200">메인</a>
+        <a href="/orchestrator" class="text-amber-400 font-medium">오케스트라</a>
+        <a href="/meme" class="text-slate-400 hover:text-slate-200">MPI</a>
+        <a href="/meme/regime" class="text-slate-400 hover:text-slate-200">Regime</a>
+        <a href="/stats" class="text-slate-400 hover:text-slate-200">수익률</a>
+        <a href="/settings" class="text-slate-400 hover:text-slate-200">설정</a>
+      </nav>
+    </header>
+
+    <section id="live-asset-bar" class="bg-slate-800 rounded-lg border border-slate-700 p-3 flex flex-wrap items-center gap-4 text-sm">
+      <span class="text-slate-400">총 자산:</span>
+      <strong id="orch-total-eval" class="text-slate-200">—</strong>
+      <span class="text-slate-400">총 매수:</span>
+      <strong id="orch-total-buy" class="text-slate-200">—</strong>
+      <span class="text-slate-400">현재 손익:</span>
+      <strong id="orch-profit" class="text-slate-200">—</strong>
+      <span id="orch-profit-pct" class="font-mono">—</span>
+    </section>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <section class="bg-slate-800 rounded-lg border border-slate-700 p-4">
+        <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">현재 SCALP 시그널</h2>
+        <pre id="scalp-signal" class="text-xs text-slate-300 whitespace-pre-wrap break-all overflow-x-auto max-h-40">—</pre>
+      </section>
+      <section class="bg-slate-800 rounded-lg border border-slate-700 p-4">
+        <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">현재 REGIME 시그널</h2>
+        <pre id="regime-signal" class="text-xs text-slate-300 whitespace-pre-wrap break-all overflow-x-auto max-h-40">—</pre>
+      </section>
+    </div>
+
+    <section class="bg-slate-800 rounded-lg border border-slate-700 p-4">
+      <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">최종 선택</h2>
+      <div class="flex flex-wrap gap-4 text-sm">
+        <span>선택 전략: <strong id="chosen-strategy" class="text-amber-400">—</strong></span>
+        <span>액션: <strong id="final-action" class="text-emerald-400">—</strong></span>
+        <span>최종 점수: <strong id="final-score" class="text-slate-200">—</strong></span>
+        <span>사유: <span id="reason" class="text-slate-400">—</span></span>
+        <span id="skip-wrap" class="hidden">SKIP 사유: <span id="skip-reason" class="text-red-400"></span></span>
+      </div>
+    </section>
+
+    <section class="bg-slate-800 rounded-lg border border-slate-700 p-4">
+      <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">P0/P1 게이트 통과 여부</h2>
+      <ul id="p0-list" class="text-xs font-mono text-slate-300 space-y-1 max-h-32 overflow-y-auto">
+        <li>—</li>
+      </ul>
+    </section>
+
+    <section class="bg-slate-800 rounded-lg border border-slate-700 p-4">
+      <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">30분 단위 의사결정 요약</h2>
+      <p class="text-slate-500 text-xs mb-2">두 봇(SCALP / REGIME) 사이의 선택 결과를 인간 언어로 요약합니다.</p>
+      <ul id="decision-summary-30" class="text-sm text-slate-200 space-y-2 max-h-48 overflow-y-auto">
+        <li>—</li>
+      </ul>
+    </section>
+
+    <section class="bg-slate-800 rounded-lg border border-slate-700 p-4">
+      <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">최근 의사결정 로그 (ENTER/EXIT)</h2>
+      <ul id="decision-log" class="text-xs font-mono text-slate-300 space-y-1 max-h-80 overflow-y-auto">
+        <li>—</li>
+      </ul>
+    </section>
+
+    <section class="bg-slate-800 rounded-lg border border-slate-700 p-4">
+      <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">orchestrator_history (최근 20건)</h2>
+      <ul id="history-list" class="text-xs font-mono text-slate-400 space-y-2 max-h-96 overflow-y-auto">
+        <li>—</li>
+      </ul>
+    </section>
+
+    <p class="text-slate-500 text-xs">실시간: Socket.io 연결됨. ORCH_PAGE_ONLY=1 이면 메인 진입 시 이 페이지로 리다이렉트됩니다.</p>
+  </div>
+  <script>
+    function applyState(data) {
+      const scalp = data.scalpSignal;
+      const regime = data.regimeSignal;
+      document.getElementById('scalp-signal').textContent = scalp
+        ? JSON.stringify({ symbol: scalp.symbol, side: scalp.side, score: scalp.score, confidence: scalp.confidence, risk_level: scalp.risk_level }, null, 2)
+        : '없음';
+      document.getElementById('regime-signal').textContent = regime
+        ? JSON.stringify({ symbol: regime.symbol, side: regime.side, score: regime.score, confidence: regime.confidence, regime_context: regime.regime_context }, null, 2)
+        : '없음';
+
+      const last = data.lastResult;
+      if (last) {
+        document.getElementById('chosen-strategy').textContent = last.chosenStrategy || '—';
+        document.getElementById('final-action').textContent = last.action || '—';
+        document.getElementById('final-score').textContent = (last.finalScore != null ? last.finalScore.toFixed(3) : '—');
+        document.getElementById('reason').textContent = last.reason || '—';
+        const skipWrap = document.getElementById('skip-wrap');
+        if (last.action === 'SKIP' && last.reason) {
+          skipWrap.classList.remove('hidden');
+          document.getElementById('skip-reason').textContent = last.reason;
+        } else {
+          skipWrap.classList.add('hidden');
+        }
+      }
+
+      const history = data.history || [];
+      const listEl = document.getElementById('history-list');
+      listEl.innerHTML = history.slice().reverse().map(line =>
+        '<li class="border-b border-slate-700 pb-1">' +
+        (line.timestamp ? new Date(line.timestamp * 1000).toISOString() : '') + ' ' +
+        (line.chosen_strategy || '') + ' ' + (line.final_action || '') + ' ' + (line.reason || '') +
+        '</li>'
+      ).join('') || '<li>—</li>';
+
+      const summary30 = data.decisionSummary30Min || [];
+      const summaryEl = document.getElementById('decision-summary-30');
+      summaryEl.innerHTML = summary30.length === 0
+        ? '<li class="text-slate-500">아직 30분 단위 요약 없음</li>'
+        : summary30.map(function (s) {
+            return '<li class="border-l-2 border-amber-500/50 pl-2"><span class="text-amber-400 font-medium">' + (s.periodLabel || '') + '</span> ' + (s.summary || '') + '</li>';
+          }).join('');
+
+      const log = data.decisionLog || [];
+      const logEl = document.getElementById('decision-log');
+      logEl.innerHTML = log.slice().reverse().map(l =>
+        '<li><span class="text-slate-500">' + (l.tag || '') + '</span> ' + (l.message || '') + '</li>'
+      ).join('') || '<li>—</li>';
+
+      const p0Summary = data.p0Summary || [];
+      const p0El = document.getElementById('p0-list');
+      if (p0Summary.length === 0) {
+        p0El.innerHTML = '<li class="text-slate-500">P0 통과 또는 데이터 없음</li>';
+      } else {
+        p0El.innerHTML = p0Summary.map(p =>
+          '<li><span class="text-amber-400">' + (p.market || '') + '</span> P0: ' + (p.p0Allowed === false ? '<span class="text-red-400">차단</span> ' + (p.p0Reason || '') : '통과') + '</li>'
+        ).join('');
+      }
+    }
+
+    function fetchAndRender() {
+      fetch('/api/orchestrator/state')
+        .then(r => r.json())
+        .then(data => {
+          fetch('/api/orchestrator/history?n=20').then(r => r.json()).then(h => {
+            const last = (h.history || [])[h.history.length - 1];
+            applyState({
+              scalpSignal: data.scalpSignal,
+              regimeSignal: data.regimeSignal,
+              decisionLog: data.decisionLog || [],
+              decisionSummary30Min: data.decisionSummary30Min || [],
+              history: h.history || [],
+              lastResult: last ? { action: last.final_action, chosenStrategy: last.chosen_strategy, finalScore: last.final_score, reason: last.reason } : null,
+              p0Summary: []
+            });
+          }).catch(() => {});
+        })
+        .catch(() => {});
+    }
+
+    fetchAndRender();
+    setInterval(fetchAndRender, 5000);
+
+    if (typeof io !== 'undefined') {
+      const socket = io();
+      socket.on('orchestrator:update', function (data) {
+        applyState(data);
+      });
+      socket.on('dashboard', function (data) {
+        const ps = data.profitSummary;
+        const assets = data.assets;
+        const totalBuy = ps?.totalBuyKrw ?? assets?.totalBuyKrwForCoins ?? assets?.totalBuyKrw ?? null;
+        const totalEval = ps?.totalEval ?? assets?.evaluationKrwForCoins ?? assets?.totalEvaluationKrw ?? null;
+        const profitKrw = ps?.profitKrw ?? (totalEval != null && totalBuy != null ? totalEval - totalBuy : null);
+        const profitPct = ps?.profitPct ?? (totalBuy > 0 && totalEval != null ? ((totalEval - totalBuy) / totalBuy * 100) : null);
+        function fmt(v) { return v != null ? Number(v).toLocaleString('ko-KR') + '원' : '—'; }
+        document.getElementById('orch-total-eval').textContent = fmt(totalEval);
+        document.getElementById('orch-total-buy').textContent = fmt(totalBuy);
+        const profitEl = document.getElementById('orch-profit');
+        const pctEl = document.getElementById('orch-profit-pct');
+        if (profitKrw != null) {
+          profitEl.textContent = (profitKrw >= 0 ? '+' : '') + Number(profitKrw).toLocaleString('ko-KR') + '원';
+          profitEl.className = profitKrw >= 0 ? 'text-emerald-400' : 'text-red-400';
+        }
+        if (profitPct != null) {
+          pctEl.textContent = (profitPct >= 0 ? '▲' : '▼') + ' ' + (profitPct >= 0 ? '+' : '') + profitPct.toFixed(2) + '%';
+          pctEl.className = profitPct > 0 ? 'text-emerald-400' : profitPct < 0 ? 'text-red-400' : 'text-slate-400';
+        }
+      });
+    }
+  </script>
+</body>
+</html>

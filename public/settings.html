@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SCALP 설정 · 스캘핑 HTS</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    body { background-color: #0f172a; }
+    .tooltip-group .tooltip-box { opacity: 0; visibility: hidden; transition: opacity 0.2s ease, visibility 0.2s; pointer-events: none; }
+    .tooltip-group:hover .tooltip-box { opacity: 1; visibility: visible; }
+    @media (max-width: 767px) {
+      .tooltip-group .tooltip-box { display: none !important; }
+      .tooltip-group .tooltip-trigger { cursor: pointer; }
+    }
+    #tooltip-modal .tooltip-modal-card { max-height: 85vh; overflow-y: auto; }
+    .preset-changed { background-color: rgb(245 158 11 / 0.25) !important; }
+    #aggressive-strategy-modal .aggressive-modal-card { max-height: min(90vh, 480px); }
+    .weight-badge { display: inline-block; }
+    .weight-badge-std { background: rgba(100, 116, 139, 0.4); color: #cbd5e1; }
+    .weight-badge-high { background: rgba(59, 130, 246, 0.35); color: #93c5fd; }
+    .weight-badge-low { background: rgba(234, 179, 8, 0.35); color: #fde047; }
+    @media (max-width: 767px) {
+      #tooltip-modal .tooltip-modal-card { max-width: 92vw; padding: 1rem; font-size: 0.9375rem; }
+    }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-[100dvh] p-4 md:p-6 pb-20 md:pb-6">
+  <nav id="bottom-nav" class="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-slate-800/95 border-t border-slate-700 flex justify-around items-center h-14">
+    <a href="/" class="flex flex-col items-center justify-center flex-1 py-2 text-slate-400 hover:text-slate-200 text-xs">메인</a>
+    <span class="flex flex-col items-center justify-center flex-1 py-2 text-amber-400 font-medium text-xs">설정</span>
+    <a href="/#log-section" class="flex flex-col items-center justify-center flex-1 py-2 text-slate-400 hover:text-slate-200 text-xs">로그</a>
+    <a href="/stats" class="flex flex-col items-center justify-center flex-1 py-2 text-slate-400 hover:text-slate-200 text-xs">수익통계</a>
+  </nav>
+
+  <div class="max-w-2xl mx-auto space-y-6">
+    <header class="border-b border-slate-600 pb-4 flex items-center justify-between">
+      <h1 class="text-xl font-bold text-slate-100">SCALP 설정</h1>
+      <nav class="hidden md:flex gap-3 text-sm">
+        <a href="/" class="text-slate-400 hover:text-slate-200">메인</a>
+        <a href="/meme" class="text-slate-400 hover:text-slate-200">MPI 상세</a>
+        <a href="/stats" class="text-slate-400 hover:text-slate-200">수익률 통계</a>
+        <a href="/manual_trade" class="text-slate-400 hover:text-slate-200">수동거래테스트</a>
+        <span class="text-amber-400 font-medium">설정</span>
+      </nav>
+    </header>
+
+    <p class="text-slate-400 text-sm bg-slate-800/60 border border-slate-600 rounded-lg px-4 py-2 mb-2">
+      주요 봇 제어(시작/중지, 청산 등)는 디스코드에서 수행됩니다. 이 화면은 전략 파라미터 조회·저장용입니다.
+    </p>
+    <p class="text-red-400 text-sm font-medium bg-red-900/20 border border-red-800/50 rounded-lg px-4 py-3">
+      본 설정에 따른 매매 결과의 책임은 사용자에게 있습니다.
+    </p>
+
+    <div class="flex justify-center md:justify-start">
+      <button type="button" id="btn-aggressive-preset" class="inline-flex items-center gap-2 px-4 py-3 md:py-2.5 rounded-xl bg-amber-500/20 border border-amber-500/50 text-amber-300 hover:bg-amber-500/30 font-medium text-sm touch-manipulation min-h-[44px] md:min-h-0">
+        🔥 유명 트레이더 공격적 전략 적용
+      </button>
+    </div>
+
+    <form id="scalp-form" class="space-y-8">
+      <section class="bg-slate-800 rounded-lg border border-slate-700 p-4 md:p-5">
+        <h2 class="text-slate-300 font-medium mb-4">P0 게이트 유연성</h2>
+        <div class="space-y-5">
+          <div class="py-2 md:py-0">
+            <div class="flex items-center justify-between mb-2 md:mb-1 gap-2">
+              <div class="flex items-center gap-1.5">
+                <span class="tooltip-group relative inline-flex">
+                  <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-slate-500 text-slate-500 text-xs flex-shrink-0" data-content="국내외 가격 차이 제한. 이 값을 넘는 프리미엄에서는 진입하지 않습니다. 표준: 3.0%.">?</span>
+                  <span class="tooltip-box absolute left-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">국내외 가격 차이 제한. 이 값을 넘는 프리미엄에서는 진입하지 않습니다. <strong>표준: 3.0%</strong>.</span>
+                </span>
+                <label for="kimp_block_pct" class="text-slate-200 text-sm">김프 차단 임계치 (%)</label>
+              </div>
+              <span class="tooltip-group relative inline-flex flex-shrink-0">
+                <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-amber-600/60 text-slate-500 text-xs" data-content="[낮추면 1.0%~] 극도의 안전 추구. 국내 프리미엄이 조금만 붙어도 진입을 차단하여 설거지 위험 방지.｜[높이면 ~5.0%] 공격적 진입. 불장(FOMO) 시 발생하는 높은 프리미엄을 감수하고 수익 기회 포착.">?</span>
+                <span class="tooltip-box absolute right-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300 whitespace-pre-line">[낮추면 1.0%~] 극도의 안전 추구. 국내 프리미엄이 조금만 붙어도 진입을 차단하여 설거지 위험 방지.
+[높이면 ~5.0%] 공격적 진입. 불장(FOMO) 시 발생하는 높은 프리미엄을 감수하고 수익 기회 포착.</span>
+              </span>
+            </div>
+            <div class="flex items-center gap-3 mt-2">
+              <input type="range" id="kimp_block_pct" name="kimp_block_pct" min="0.5" max="20" step="0.5" value="3" class="flex-1 h-4 md:h-2 py-2 md:py-0 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-amber-500 touch-manipulation min-h-[44px] md:min-h-0">
+              <input type="number" id="kimp_block_pct_num" min="0.5" max="20" step="0.5" value="3" class="w-20 rounded-lg border border-slate-600 bg-slate-700 px-2 py-2 md:py-1 text-slate-200 text-sm">
+              <span class="text-slate-500 text-sm">%</span>
+            </div>
+          </div>
+          <div class="py-2 md:py-0">
+            <div class="flex items-center justify-between mb-2 md:mb-1 gap-2">
+              <div class="flex items-center gap-1.5">
+                <span class="tooltip-group relative inline-flex">
+                  <span class="tooltip-trigger text-slate-500 cursor-help touch-manipulation w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-slate-500 text-xs flex-shrink-0" data-content="시장가 매수 시 허용 오차. 호가·체결 지연으로 인한 가격 밀림 상한선. 표준: 0.05% ~ 0.1%.">?</span>
+                  <span class="tooltip-box absolute left-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">시장가 매수 시 허용 오차. 호가·체결 지연으로 인한 가격 밀림 상한선. <strong>표준: 0.05% ~ 0.1%</strong>.</span>
+                </span>
+                <label for="slippage_tolerance_pct" class="text-slate-200 text-sm">슬리피지 허용 범위 (%)</label>
+              </div>
+              <span class="tooltip-group relative inline-flex flex-shrink-0">
+                <span class="tooltip-trigger text-slate-500 cursor-help touch-manipulation w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-amber-600/60 text-xs" data-content="[낮추면] 정교한 체결 중시. 지정한 가격에서 크게 벗어나면 사지 않음 (체결 실패 빈도 증가).｜[높이면] 체결 우선. 변동성이 커서 가격이 밀리더라도 무조건 진입 시도.">?</span>
+                <span class="tooltip-box absolute right-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300 whitespace-pre-line">[낮추면] 정교한 체결 중시. 지정한 가격에서 크게 벗어나면 사지 않음 (체결 실패 빈도 증가).
+[높이면] 체결 우선. 변동성이 커서 가격이 밀리더라도 무조건 진입 시도.</span>
+              </span>
+            </div>
+            <input type="number" id="slippage_tolerance_pct" name="slippage_tolerance_pct" min="0" max="2" step="0.01" value="0.05" class="w-28 rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 md:py-1.5 text-slate-200 text-sm touch-manipulation">
+            <span class="text-slate-500 text-sm ml-1">%</span>
+          </div>
+          <div class="py-2 md:py-0">
+            <div class="flex items-center justify-between mb-2 md:mb-1">
+              <div class="flex items-center gap-1.5">
+                <span class="tooltip-group relative inline-flex">
+                  <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-slate-500 text-slate-500 text-xs" data-content="업비트 서버와의 통신 지연 제한. 이 값을 넘으면 진입하지 않습니다. 표준: 500ms.">?</span>
+                  <span class="tooltip-box absolute left-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">업비트 서버와의 통신 지연 제한. 이 값을 넘으면 진입하지 않습니다. <strong>표준: 500ms</strong>.</span>
+                </span>
+                <label for="max_latency_ms" class="text-slate-200 text-sm">최대 허용 지연시간 (ms)</label>
+              </div>
+              <span class="tooltip-group relative inline-flex flex-shrink-0">
+                <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-amber-600/60 text-slate-500 text-xs" data-content="[낮추면] 네트워크 무결성 중시. 서버 반응이 느리면 타점이 어긋날 수 있으므로 진입 차단. [높이면] 불안정한 네트워크에서도 매매 지속.">?</span>
+                <span class="tooltip-box absolute right-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">[낮추면] 네트워크 무결성 중시. 서버 반응이 느리면 타점이 어긋날 수 있으므로 진입 차단. [높이면] 불안정한 네트워크에서도 매매 지속.</span>
+              </span>
+            </div>
+            <input type="number" id="max_latency_ms" name="max_latency_ms" min="100" max="10000" value="500" class="w-28 rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 md:py-1.5 text-slate-200 text-sm touch-manipulation">
+            <span class="text-slate-500 text-sm ml-1">ms</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="bg-slate-800 rounded-lg border border-slate-700 p-4 md:p-5">
+        <h2 class="text-slate-300 font-medium mb-4">Entry Score 가중치 (0 ~ 3.0)</h2>
+        <p class="text-slate-400 text-xs mb-4">Final Score = (항목별 충족 여부 × 사용자 가중치)의 합. <strong>0도 저장됨</strong>(0 = 해당 지표 무시). 미입력 시 표준값(1.0 / 0.5) 자동 적용. 표준 1.0·보편 권장 0.5(안정성). 좌(?) 지표 정의, 우(?) 값 변경 시 기대 효과.</p>
+        <div class="mb-4">
+          <button type="button" id="btn-default-weights" class="px-3 py-1.5 rounded-lg bg-slate-600 hover:bg-slate-500 text-slate-200 text-sm border border-slate-500">기본값 채우기</button>
+          <span class="text-slate-500 text-xs ml-2">가격돌파·Vol·OBI·Strength 1.0 / 스프레드·깊이·김프 0.5</span>
+        </div>
+        <div class="space-y-4">
+          <div class="flex items-center justify-between gap-2 py-2 md:py-1">
+            <div class="flex items-center gap-1.5 min-w-0">
+              <span class="tooltip-group relative inline-flex flex-shrink-0">
+                <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-slate-500 text-slate-500 text-xs" data-content="전고점(저항선)을 현재가가 넘어섰을 때 충족. 추세 추종 진입의 핵심 조건입니다.">?</span>
+                <span class="tooltip-box absolute left-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">전고점(저항선)을 현재가가 넘어섰을 때 충족. 추세 추종 진입의 핵심 조건입니다.</span>
+              </span>
+              <label for="weight_price_break" class="text-slate-200 text-sm">가격 돌파 (Price Break)</label>
+            </div>
+            <div class="flex items-center gap-1.5 flex-shrink-0">
+              <span class="tooltip-group relative inline-flex">
+                <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-amber-600/60 text-slate-500 text-xs" data-content="높일수록 전고점 돌파라는 확실한 추세 형성 시에만 진입하여 승률 상승.">?</span>
+                <span class="tooltip-box absolute right-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">높일수록 전고점 돌파라는 확실한 추세 형성 시에만 진입하여 승률 상승.</span>
+              </span>
+              <input type="number" id="weight_price_break" name="weight_price_break" min="0" max="3" step="0.1" value="1" class="w-20 rounded-lg border border-slate-600 bg-slate-700 px-2 py-2 md:py-1 text-slate-200 text-sm text-right touch-manipulation">
+              <span class="weight-badge weight-badge-std rounded px-2 py-0.5 text-sm font-medium min-w-[2.5rem] text-center" id="weight_price_break_badge" data-weight-id="weight_price_break">1</span>
+            </div>
+          </div>
+          <div class="flex items-center justify-between gap-2 py-2 md:py-1">
+            <div class="flex items-center gap-1.5 min-w-0">
+              <span class="tooltip-group relative inline-flex flex-shrink-0">
+                <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-slate-500 text-slate-500 text-xs" data-content="최근 10초 거래대금이 직전 기준(평균) 대비 설정 배수 이상일 때 충족. 수급 강도를 측정합니다.">?</span>
+                <span class="tooltip-box absolute left-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">최근 10초 거래대금이 직전 기준(평균) 대비 설정 배수 이상일 때 충족. 수급 강도를 측정합니다.</span>
+              </span>
+              <label for="weight_vol_surge" class="text-slate-200 text-sm">거래량 급증 (Vol Surge)</label>
+            </div>
+            <div class="flex items-center gap-1.5 flex-shrink-0">
+              <span class="tooltip-group relative inline-flex">
+                <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-amber-600/60 text-slate-500 text-xs" data-content="높일수록 가짜 반등을 걸러내고 실제 '돈이 들어온' 종목에만 집중.">?</span>
+                <span class="tooltip-box absolute right-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">높일수록 가짜 반등을 걸러내고 실제 '돈이 들어온' 종목에만 집중.</span>
+              </span>
+              <input type="number" id="weight_vol_surge" name="weight_vol_surge" min="0" max="3" step="0.1" value="1" class="w-20 rounded-lg border border-slate-600 bg-slate-700 px-2 py-2 md:py-1 text-slate-200 text-sm text-right touch-manipulation">
+              <span class="weight-badge weight-badge-std rounded px-2 py-0.5 text-sm font-medium min-w-[2.5rem] text-center" id="weight_vol_surge_badge" data-weight-id="weight_vol_surge">1</span>
+            </div>
+          </div>
+          <div class="flex items-center justify-between gap-2 py-2 md:py-1">
+            <div class="flex items-center gap-1.5 min-w-0">
+              <span class="tooltip-group relative inline-flex flex-shrink-0">
+                <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-slate-500 text-slate-500 text-xs" data-content="상위 호가의 매수/매도 잔량 비율(OBI). 매수 잔량이 상대적으로 많을 때 충족.">?</span>
+                <span class="tooltip-box absolute left-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">상위 호가의 매수/매도 잔량 비율(OBI). 매수 잔량이 상대적으로 많을 때 충족.</span>
+              </span>
+              <label for="weight_obi" class="text-slate-200 text-sm">호가 균형 (OBI)</label>
+            </div>
+            <div class="flex items-center gap-1.5 flex-shrink-0">
+              <span class="tooltip-group relative inline-flex">
+                <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-amber-600/60 text-slate-500 text-xs" data-content="높일수록 하단 매수벽이 두터워 하락 지지력이 확인된 안전한 상황에서만 진입.">?</span>
+                <span class="tooltip-box absolute right-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">높일수록 하단 매수벽이 두터워 하락 지지력이 확인된 안전한 상황에서만 진입.</span>
+              </span>
+              <input type="number" id="weight_obi" name="weight_obi" min="0" max="3" step="0.1" value="1" class="w-20 rounded-lg border border-slate-600 bg-slate-700 px-2 py-2 md:py-1 text-slate-200 text-sm text-right touch-manipulation">
+              <span class="weight-badge weight-badge-std rounded px-2 py-0.5 text-sm font-medium min-w-[2.5rem] text-center" id="weight_obi_badge" data-weight-id="weight_obi">1</span>
+            </div>
+          </div>
+          <div class="flex items-center justify-between gap-2 py-2 md:py-1">
+            <div class="flex items-center gap-1.5 min-w-0">
+              <span class="tooltip-group relative inline-flex flex-shrink-0">
+                <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-slate-500 text-slate-500 text-xs" data-content="최근 60초 체결에서 매수세가 매도세 대비 얼마나 강한지(0~1). 설정 임계값 이상이면 충족.">?</span>
+                <span class="tooltip-box absolute left-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">최근 60초 체결에서 매수세가 매도세 대비 얼마나 강한지(0~1). 설정 임계값 이상이면 충족.</span>
+              </span>
+              <label for="weight_strength" class="text-slate-200 text-sm">체결 강도 (Strength)</label>
+            </div>
+            <div class="flex items-center gap-1.5 flex-shrink-0">
+              <span class="tooltip-group relative inline-flex">
+                <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-amber-600/60 text-slate-500 text-xs" data-content="높일수록 실시간 매수 에너지가 압도적인 종목에 가중치 부여.">?</span>
+                <span class="tooltip-box absolute right-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">높일수록 실시간 매수 에너지가 압도적인 종목에 가중치 부여.</span>
+              </span>
+              <input type="number" id="weight_strength" name="weight_strength" min="0" max="3" step="0.1" value="1" class="w-20 rounded-lg border border-slate-600 bg-slate-700 px-2 py-2 md:py-1 text-slate-200 text-sm text-right touch-manipulation">
+              <span class="weight-badge weight-badge-std rounded px-2 py-0.5 text-sm font-medium min-w-[2.5rem] text-center" id="weight_strength_badge" data-weight-id="weight_strength">1</span>
+            </div>
+          </div>
+          <div class="flex items-center justify-between gap-2 py-2 md:py-1">
+            <div class="flex items-center gap-1.5 min-w-0">
+              <span class="tooltip-group relative inline-flex flex-shrink-0">
+                <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-slate-500 text-slate-500 text-xs" data-content="매수/매도 호가 간격. 정상 범위일 때 P0 통과.">?</span>
+                <span class="tooltip-box absolute left-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">매수/매도 호가 간격. 정상 범위일 때 P0 통과.</span>
+              </span>
+              <label for="weight_spread" class="text-slate-200 text-sm">스프레드 안정성</label>
+            </div>
+            <div class="flex items-center gap-1.5 flex-shrink-0">
+              <span class="tooltip-group relative inline-flex">
+                <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-amber-600/60 text-slate-500 text-xs" data-content="값이 높을수록 호가 갭이 좁고 촘촘한 안전한 코인만 공략.">?</span>
+                <span class="tooltip-box absolute right-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">값이 높을수록 호가 갭이 좁고 촘촘한 안전한 코인만 공략.</span>
+              </span>
+              <input type="number" id="weight_spread" name="weight_spread" min="0" max="3" step="0.1" value="0.5" class="w-20 rounded-lg border border-slate-600 bg-slate-700 px-2 py-2 md:py-1 text-slate-200 text-sm text-right touch-manipulation">
+              <span class="weight-badge weight-badge-low rounded px-2 py-0.5 text-sm font-medium min-w-[2.5rem] text-center" id="weight_spread_badge" data-weight-id="weight_spread">0.5</span>
+            </div>
+          </div>
+          <div class="flex items-center justify-between gap-2 py-2 md:py-1">
+            <div class="flex items-center gap-1.5 min-w-0">
+              <span class="tooltip-group relative inline-flex flex-shrink-0">
+                <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-slate-500 text-slate-500 text-xs" data-content="호가창에 쌓인 물량 두께. 유동성 충분 시 P0 통과.">?</span>
+                <span class="tooltip-box absolute left-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">호가창에 쌓인 물량 두께. 유동성 충분 시 P0 통과.</span>
+              </span>
+              <label for="weight_depth" class="text-slate-200 text-sm">호가 깊이</label>
+            </div>
+            <div class="flex items-center gap-1.5 flex-shrink-0">
+              <span class="tooltip-group relative inline-flex">
+                <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-amber-600/60 text-slate-500 text-xs" data-content="값이 높을수록 대량 주문 시 가격 밀림(슬리피지)이 적은 코인 우선.">?</span>
+                <span class="tooltip-box absolute right-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">값이 높을수록 대량 주문 시 가격 밀림(슬리피지)이 적은 코인 우선.</span>
+              </span>
+              <input type="number" id="weight_depth" name="weight_depth" min="0" max="3" step="0.1" value="0.5" class="w-20 rounded-lg border border-slate-600 bg-slate-700 px-2 py-2 md:py-1 text-slate-200 text-sm text-right touch-manipulation">
+              <span class="weight-badge weight-badge-low rounded px-2 py-0.5 text-sm font-medium min-w-[2.5rem] text-center" id="weight_depth_badge" data-weight-id="weight_depth">0.5</span>
+            </div>
+          </div>
+          <div class="flex items-center justify-between gap-2 py-2 md:py-1">
+            <div class="flex items-center gap-1.5 min-w-0">
+              <span class="tooltip-group relative inline-flex flex-shrink-0">
+                <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-slate-500 text-slate-500 text-xs" data-content="국내외 시세 괴리율의 변동폭. 임계값 이하일 때 P0 통과.">?</span>
+                <span class="tooltip-box absolute left-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">국내외 시세 괴리율의 변동폭. 임계값 이하일 때 P0 통과.</span>
+              </span>
+              <label for="weight_kimp" class="text-slate-200 text-sm">김프 안정성</label>
+            </div>
+            <div class="flex items-center gap-1.5 flex-shrink-0">
+              <span class="tooltip-group relative inline-flex">
+                <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-amber-600/60 text-slate-500 text-xs" data-content="값이 높을수록 김프가 급변하지 않고 안정적인 상태에서만 진입.">?</span>
+                <span class="tooltip-box absolute right-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">값이 높을수록 김프가 급변하지 않고 안정적인 상태에서만 진입.</span>
+              </span>
+              <input type="number" id="weight_kimp" name="weight_kimp" min="0" max="3" step="0.1" value="0.5" class="w-20 rounded-lg border border-slate-600 bg-slate-700 px-2 py-2 md:py-1 text-slate-200 text-sm text-right touch-manipulation">
+              <span class="weight-badge weight-badge-low rounded px-2 py-0.5 text-sm font-medium min-w-[2.5rem] text-center" id="weight_kimp_badge" data-weight-id="weight_kimp">0.5</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <details class="bg-slate-800 rounded-lg border border-slate-700 overflow-hidden">
+        <summary class="text-slate-300 font-medium p-4 md:p-5 cursor-pointer list-none flex items-center justify-between gap-2">
+          <span>P1 진입 가중치 (1~10, 레거시)</span>
+          <span class="text-slate-500 text-xs">접기/펼치기</span>
+        </summary>
+        <div class="px-4 pb-4 md:px-5 md:pb-5 space-y-5 border-t border-slate-700 pt-4">
+          <div class="py-2 md:py-0">
+            <div class="flex items-center justify-between mb-2 md:mb-1"><label for="vol_surge_weight" class="text-slate-200 text-sm">거래량 급증 (Vol Surge)</label><span id="vol_surge_value" class="text-amber-400 text-xs">5</span></div>
+            <input type="range" id="vol_surge_weight" name="vol_surge_weight" min="1" max="10" value="5" class="w-full h-4 md:h-2 py-2 md:py-0 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-amber-500 touch-manipulation min-h-[44px] md:min-h-0">
+          </div>
+          <div class="py-2 md:py-0">
+            <div class="flex items-center justify-between mb-2 md:mb-1"><label for="price_break_weight" class="text-slate-200 text-sm">전고점 돌파 (Price Break)</label><span id="price_break_value" class="text-amber-400 text-xs">4</span></div>
+            <input type="range" id="price_break_weight" name="price_break_weight" min="1" max="10" value="4" class="w-full h-4 md:h-2 py-2 md:py-0 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-amber-500 touch-manipulation min-h-[44px] md:min-h-0">
+          </div>
+          <div class="py-2 md:py-0">
+            <div class="flex items-center justify-between mb-2 md:mb-1"><label for="strength_weight" class="text-slate-200 text-sm">체결 강도 (Strength)</label><span id="strength_value" class="text-amber-400 text-xs">2</span></div>
+            <input type="range" id="strength_weight" name="strength_weight" min="1" max="10" value="2" class="w-full h-4 md:h-2 py-2 md:py-0 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-amber-500 touch-manipulation min-h-[44px] md:min-h-0">
+          </div>
+        </div>
+      </details>
+
+      <p class="text-amber-200/90 text-sm bg-amber-900/20 border border-amber-700/50 rounded-lg px-4 py-3">
+        <strong>최소 주문 금액:</strong> 업비트 규정에 따라 최소 주문 금액은 5,000원 이상입니다. 봇은 이 기준을 로직에 고정하여 적용합니다.
+      </p>
+
+      <section class="bg-slate-800 rounded-lg border border-slate-700 p-4 md:p-5">
+        <h2 class="text-slate-300 font-medium mb-4">Greedy 가변 비중</h2>
+        <p class="text-slate-400 text-xs mb-4">시장 에너지 점수(일봉 이평·4h RSI·30m 거래량)에 따라 매수 비중을 자동 조절합니다. 20점 미만 시 진입 차단.</p>
+        <div class="space-y-4">
+          <div class="flex items-center justify-between gap-4">
+            <label for="greedy_enabled" class="text-slate-200 text-sm">Greedy 모드 활성화</label>
+            <input type="checkbox" id="greedy_enabled" name="greedy_enabled" class="rounded border-slate-500 bg-slate-700 text-amber-500 focus:ring-amber-500">
+          </div>
+          <div class="flex items-center justify-between gap-4">
+            <label for="max_bet_multiplier" class="text-slate-200 text-sm">최대 베팅 배율</label>
+            <span id="max_bet_multiplier_value" class="text-amber-400 text-sm">2.0</span>
+            <input type="range" id="max_bet_multiplier" name="max_bet_multiplier" min="1" max="2.5" step="0.1" value="2" class="w-32 h-3 md:h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-amber-500 touch-manipulation">
+          </div>
+          <p class="text-slate-500 text-xs">1.0 ~ 2.5배 (예: 2.0이면 시장 100점일 때 평소의 2배까지 매수)</p>
+        </div>
+      </section>
+
+      <section class="bg-slate-800 rounded-lg border border-slate-700 p-4 md:p-5">
+        <h2 class="text-slate-300 font-medium mb-4">청산 전략</h2>
+        <div class="space-y-4">
+          <div class="flex items-center gap-2 flex-wrap py-1">
+            <span class="tooltip-group relative inline-flex">
+              <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-slate-500 text-slate-500 text-xs" data-content="지정된 손실률 도달 시 즉시 시장가 매도하여 추가 하락 방지. 표준: -0.3% ~ -0.5%(스캘핑).">?</span>
+              <span class="tooltip-box absolute left-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">지정된 손실률 도달 시 즉시 시장가 매도하여 추가 하락 방지. <strong>표준: -0.3% ~ -0.5%</strong> (스캘핑).</span>
+            </span>
+            <span class="tooltip-group relative inline-flex flex-shrink-0">
+              <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-amber-600/60 text-slate-500 text-xs" data-content="[타이트 -0.2%] 손실 최소화. 조금만 꺾여도 바로 탈출하여 자산 보호.｜[넓게 -1.0%] 일시적 흔들기(노이즈)를 견디며 반등 기회를 기다림.">?</span>
+              <span class="tooltip-box absolute right-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300 whitespace-pre-line">[타이트 -0.2%] 손실 최소화. 조금만 꺾여도 바로 탈출하여 자산 보호.
+[넓게 -1.0%] 일시적 흔들기(노이즈)를 견디며 반등 기회를 기다림.</span>
+            </span>
+            <label for="stop_loss_pct" class="text-slate-200 text-sm">손절 라인 (-%)</label>
+            <input type="number" id="stop_loss_pct" name="stop_loss_pct" step="0.01" min="-10" max="0" value="-0.35" class="w-24 rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 md:py-1.5 text-slate-200 text-sm touch-manipulation">
+            <span class="text-slate-500 text-sm">%</span>
+          </div>
+          <div class="flex items-center gap-2 flex-wrap py-1">
+            <span class="tooltip-group relative inline-flex">
+              <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-slate-500 text-slate-500 text-xs" data-content="진입 후 수익이 나지 않는 '지루한 흐름'에서 기회비용 확보를 위해 강제 탈출. 표준: 120~180초.">?</span>
+              <span class="tooltip-box absolute left-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">진입 후 수익이 나지 않는 '지루한 흐름'에서 기회비용 확보를 위해 강제 탈출. <strong>표준: 120~180초</strong>.</span>
+            </span>
+            <span class="tooltip-group relative inline-flex flex-shrink-0">
+              <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-amber-600/60 text-slate-500 text-xs" data-content="[짧게 60초] 회전율 극대화. 진입 후 즉시 반응이 없으면 기회비용 확보를 위해 즉시 탈출.">?</span>
+              <span class="tooltip-box absolute right-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">[짧게 60초] 회전율 극대화. 진입 후 즉시 반응이 없으면 기회비용 확보를 위해 즉시 탈출.</span>
+            </span>
+            <label for="time_stop_sec" class="text-slate-200 text-sm">타임스탑 (초)</label>
+            <input type="number" id="time_stop_sec" name="time_stop_sec" min="1" max="600" value="150" class="w-24 rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 md:py-1.5 text-slate-200 text-sm touch-manipulation">
+            <span class="text-slate-500 text-sm">초</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="bg-slate-800 rounded-lg border border-slate-700 p-4 md:p-5">
+        <h2 class="text-slate-300 font-medium mb-4">익절 전략 (Take-Profit)</h2>
+        <div class="space-y-4">
+          <div class="flex items-center gap-2 flex-wrap py-1">
+            <span class="tooltip-group relative inline-flex">
+              <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-slate-500 text-slate-500 text-xs" data-content="최소 익절 기준. 지정 수익률 도달 시 매도.">?</span>
+              <span class="tooltip-box absolute left-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">최소 익절 기준. 지정 수익률 도달 시 매도.</span>
+            </span>
+            <span class="tooltip-group relative inline-flex flex-shrink-0">
+              <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-amber-600/60 text-slate-500 text-xs" data-content="지정된 수익률 도달 시 즉시 매도하여 수익 확정. (권장: 0.5% ~ 1.5%)">?</span>
+              <span class="tooltip-box absolute right-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">지정된 수익률 도달 시 즉시 매도하여 수익 확정. (권장: 0.5% ~ 1.5%)</span>
+            </span>
+            <label for="take_profit_target_pct" class="text-slate-200 text-sm">목표 익절가 (%)</label>
+            <input type="number" id="take_profit_target_pct" name="take_profit_target_pct" min="0" max="10" step="0.1" value="1" class="w-24 rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 md:py-1.5 text-slate-200 text-sm touch-manipulation">
+            <span class="text-slate-500 text-sm">%</span>
+          </div>
+          <div class="flex items-center gap-2 flex-wrap py-1">
+            <span class="tooltip-group relative inline-flex">
+              <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-slate-500 text-slate-500 text-xs" data-content="수익 보존 추적 매도. 고점 대비 % 하락 시 매도.">?</span>
+              <span class="tooltip-box absolute left-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">수익 보존 추적 매도. 고점 대비 % 하락 시 매도.</span>
+            </span>
+            <span class="tooltip-group relative inline-flex flex-shrink-0">
+              <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-amber-600/60 text-slate-500 text-xs" data-content="고점 대비 설정한 %만큼 하락 시 매도. 수익을 길게 가져가되 꺾이면 바로 나옴.">?</span>
+              <span class="tooltip-box absolute right-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">고점 대비 설정한 %만큼 하락 시 매도. 수익을 길게 가져가되 꺾이면 바로 나옴.</span>
+            </span>
+            <label for="trailing_stop_pct" class="text-slate-200 text-sm">트레일링 스탑 (%)</label>
+            <input type="number" id="trailing_stop_pct" name="trailing_stop_pct" min="0" max="10" step="0.1" value="0.5" class="w-24 rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 md:py-1.5 text-slate-200 text-sm touch-manipulation">
+            <span class="text-slate-500 text-sm">%</span>
+          </div>
+          <div class="flex items-center gap-2 flex-wrap py-1">
+            <span class="tooltip-group relative inline-flex">
+              <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-slate-500 text-slate-500 text-xs" data-content="지표 악화 시 조기 탈출. Entry Score가 설정값 이하로 떨어지면 익절.">?</span>
+              <span class="tooltip-box absolute left-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">지표 악화 시 조기 탈출. Entry Score가 설정값 이하로 떨어지면 익절.</span>
+            </span>
+            <span class="tooltip-group relative inline-flex flex-shrink-0">
+              <span class="tooltip-trigger cursor-help w-6 h-6 md:w-5 md:h-5 flex items-center justify-center rounded-full border border-amber-600/60 text-slate-500 text-xs" data-content="보유 중 Entry Score가 설정값(예: 1점) 이하로 떨어지면 추세 꺾임으로 간주하고 익절.">?</span>
+              <span class="tooltip-box absolute right-0 bottom-full mb-1 w-72 max-w-[90vw] p-3 text-xs rounded-lg bg-slate-700 border border-slate-600 shadow-xl z-40 text-slate-300">보유 중 Entry Score가 설정값(예: 1점) 이하로 떨어지면 추세 꺾임으로 간주하고 익절.</span>
+            </span>
+            <label for="score_out_threshold" class="text-slate-200 text-sm">강제 익절 점수 (Score-out)</label>
+            <input type="number" id="score_out_threshold" name="score_out_threshold" min="0" max="7" step="1" value="1" class="w-24 rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 md:py-1.5 text-slate-200 text-sm touch-manipulation">
+          </div>
+        </div>
+      </section>
+
+      <section class="bg-slate-800 rounded-lg border border-slate-700 p-4 md:p-5">
+        <h2 class="text-slate-300 font-medium mb-4">스케줄 · 특수 모드</h2>
+        <div class="flex items-center justify-between gap-4">
+          <label for="race_horse_scheduler_enabled" class="text-slate-200 text-sm">경주마 자동 전환 활성화</label>
+          <input type="checkbox" id="race_horse_scheduler_enabled" name="race_horse_scheduler_enabled" class="rounded border-slate-500 bg-slate-700 text-amber-500 focus:ring-amber-500">
+        </div>
+        <p class="text-slate-500 text-xs mt-2">매일 08:55~09:10(KST)에만 거래량/체결강도 가중치 최상, 가격돌파 낮춤, 김프 7% 완화가 자동 적용됩니다. 09:10 이후 일반 전략으로 복구됩니다.</p>
+      </section>
+
+      <input type="hidden" id="aggressive_mode" name="aggressive_mode" value="0">
+      <div class="flex justify-end">
+        <button type="submit" id="btn-apply" class="px-6 py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-900 font-medium text-sm touch-manipulation min-h-[44px] md:min-h-0">변경사항 저장</button>
+      </div>
+    </form>
+
+    <p id="apply-status" class="text-slate-500 text-sm text-center min-h-[1.5rem]"></p>
+  </div>
+
+  <div id="tooltip-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 bg-black/60" aria-hidden="true">
+    <div class="tooltip-modal-card w-full max-w-md rounded-xl bg-slate-800 border border-slate-600 shadow-2xl p-4 text-slate-200 text-sm">
+      <p id="tooltip-modal-content" class="whitespace-pre-line"></p>
+      <div class="mt-4 flex justify-end">
+        <button type="button" id="tooltip-modal-close" class="px-4 py-2 rounded-lg bg-slate-600 hover:bg-slate-500 text-slate-200 text-sm">닫기</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="aggressive-strategy-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 bg-black/60 md:p-6" aria-hidden="true">
+    <div class="aggressive-modal-card w-full max-w-md rounded-xl bg-slate-800 border border-amber-500/40 shadow-2xl p-5 md:p-6 mx-auto flex flex-col max-h-[90vh]">
+      <h3 class="text-amber-400 font-semibold text-lg mb-3">공격적 전략 가이드</h3>
+      <p class="text-slate-300 text-sm leading-relaxed flex-1 overflow-y-auto mb-6">
+        이 설정은 고회전율 스캘핑 전문가들의 로직을 바탕으로 합니다. 추세가 확실한 종목에 비중을 싣고(Greedy), 짧은 손절과 타임스탑으로 회전율을 극대화합니다. 김프와 슬리피지 기준을 완화하여 변동성 장세에서도 진입 기회를 놓치지 않도록 설계되었습니다.
+      </p>
+      <div class="flex justify-end gap-3 flex-shrink-0">
+        <button type="button" id="aggressive-modal-cancel" class="px-5 py-3 md:py-2.5 rounded-xl bg-slate-600 hover:bg-slate-500 text-slate-200 text-sm font-medium min-h-[48px] min-w-[80px] touch-manipulation">취소</button>
+        <button type="button" id="aggressive-modal-confirm" class="px-6 py-3 md:py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-900 font-medium text-sm min-h-[48px] min-w-[88px] touch-manipulation">확인</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      var socket = io();
+      var form = document.getElementById('scalp-form');
+      var statusEl = document.getElementById('apply-status');
+
+      function setStatus(msg, isError) {
+        if (!statusEl) return;
+        statusEl.textContent = msg || '';
+        statusEl.className = 'text-sm text-center min-h-[1.5rem] ' + (isError ? 'text-red-400' : 'text-slate-500');
+      }
+
+      function parseWeight(val, defaultVal) {
+        var n = parseFloat(val);
+        if (isNaN(n) || n < 0) return defaultVal;
+        return Math.min(3, Math.max(0, n));
+      }
+      function payloadFromForm() {
+        var kimpNum = document.getElementById('kimp_block_pct_num');
+        var kimpRange = document.getElementById('kimp_block_pct');
+        var payload = {
+          kimp_block_pct: kimpNum ? parseFloat(kimpNum.value) : (kimpRange ? parseFloat(kimpRange.value) : 3),
+          slippage_tolerance_pct: parseFloat(document.getElementById('slippage_tolerance_pct').value) || 0.05,
+          max_latency_ms: parseInt(document.getElementById('max_latency_ms').value, 10) || 500,
+          weight_price_break: parseWeight(document.getElementById('weight_price_break').value, 1),
+          weight_vol_surge: parseWeight(document.getElementById('weight_vol_surge').value, 1),
+          weight_obi: parseWeight(document.getElementById('weight_obi').value, 1),
+          weight_strength: parseWeight(document.getElementById('weight_strength').value, 1),
+          weight_spread: parseWeight(document.getElementById('weight_spread').value, 0.5),
+          weight_depth: parseWeight(document.getElementById('weight_depth').value, 0.5),
+          weight_kimp: parseWeight(document.getElementById('weight_kimp').value, 0.5),
+          vol_surge_weight: parseInt(document.getElementById('vol_surge_weight').value, 10),
+          price_break_weight: parseInt(document.getElementById('price_break_weight').value, 10),
+          strength_weight: parseInt(document.getElementById('strength_weight').value, 10),
+          stop_loss_pct: parseFloat(document.getElementById('stop_loss_pct').value),
+          time_stop_sec: parseInt(document.getElementById('time_stop_sec').value, 10),
+          take_profit_target_pct: parseFloat(document.getElementById('take_profit_target_pct').value) || 1,
+          trailing_stop_pct: parseFloat(document.getElementById('trailing_stop_pct').value) || 0.5,
+          score_out_threshold: parseInt(document.getElementById('score_out_threshold').value, 10) || 1,
+          greedy_enabled: document.getElementById('greedy_enabled').checked,
+          max_bet_multiplier: parseFloat(document.getElementById('max_bet_multiplier').value) || 2,
+          aggressive_mode: document.getElementById('aggressive_mode') && document.getElementById('aggressive_mode').value === '1',
+          race_horse_scheduler_enabled: document.getElementById('race_horse_scheduler_enabled') && document.getElementById('race_horse_scheduler_enabled').checked
+        };
+        return payload;
+      }
+
+      function fillForm(data) {
+        if (!data) return;
+        var kimpPct = data.kimp_block_pct != null ? Number(data.kimp_block_pct) : 3;
+        var kimpRange = document.getElementById('kimp_block_pct');
+        var kimpNum = document.getElementById('kimp_block_pct_num');
+        if (kimpRange) kimpRange.value = kimpPct;
+        if (kimpNum) kimpNum.value = kimpPct;
+        var slip = data.slippage_tolerance_pct != null ? Number(data.slippage_tolerance_pct) : 0.05;
+        var slipEl = document.getElementById('slippage_tolerance_pct');
+        if (slipEl) slipEl.value = slip;
+        var lat = data.rest_latency_ms_max != null ? Number(data.rest_latency_ms_max) : 500;
+        var latEl = document.getElementById('max_latency_ms');
+        if (latEl) latEl.value = lat;
+        ['weight_price_break', 'weight_vol_surge', 'weight_obi', 'weight_strength', 'weight_spread', 'weight_depth', 'weight_kimp'].forEach(function (key) {
+          var def = key === 'weight_price_break' || key === 'weight_vol_surge' || key === 'weight_obi' || key === 'weight_strength' ? 1 : 0.5;
+          var val = data[key] != null && !isNaN(Number(data[key])) ? Number(data[key]) : def;
+          var el = document.getElementById(key);
+          if (el) el.value = val;
+        });
+        var v = Math.min(10, Math.max(1, parseInt(data.vol_surge_weight, 10) || 5));
+        var vs = document.getElementById('vol_surge_weight');
+        if (vs) { vs.value = v; document.getElementById('vol_surge_value').textContent = v; }
+        var pb = Math.min(10, Math.max(1, parseInt(data.price_break_weight, 10) || 4));
+        var pbs = document.getElementById('price_break_weight');
+        if (pbs) { pbs.value = pb; document.getElementById('price_break_value').textContent = pb; }
+        var st = Math.min(10, Math.max(1, parseInt(data.strength_weight, 10) || 2));
+        var sts = document.getElementById('strength_weight');
+        if (sts) { sts.value = st; document.getElementById('strength_value').textContent = st; }
+        var sl = document.getElementById('stop_loss_pct');
+        if (sl && data.stop_loss_pct != null) sl.value = data.stop_loss_pct;
+        var ts = document.getElementById('time_stop_sec');
+        if (ts && data.time_stop_sec != null) ts.value = data.time_stop_sec;
+        var tpt = document.getElementById('take_profit_target_pct');
+        if (tpt) tpt.value = data.take_profit_target_pct != null ? data.take_profit_target_pct : 1;
+        var trl = document.getElementById('trailing_stop_pct');
+        if (trl) trl.value = data.trailing_stop_pct != null ? data.trailing_stop_pct : 0.5;
+        var sco = document.getElementById('score_out_threshold');
+        if (sco) sco.value = data.score_out_threshold != null ? data.score_out_threshold : 1;
+        var ge = document.getElementById('greedy_enabled');
+        if (ge) ge.checked = !!data.greedy_mode;
+        var mb = document.getElementById('max_bet_multiplier');
+        var mbVal = data.max_bet_multiplier != null ? Math.min(2.5, Math.max(1, Number(data.max_bet_multiplier))) : 2;
+        if (mb) { mb.value = mbVal; }
+        var mbV = document.getElementById('max_bet_multiplier_value');
+        if (mbV) mbV.textContent = mbVal;
+        var ag = document.getElementById('aggressive_mode');
+        if (ag) ag.value = data.aggressive_mode ? '1' : '0';
+        var rh = document.getElementById('race_horse_scheduler_enabled');
+        if (rh) rh.checked = !!data.race_horse_scheduler_enabled;
+        document.querySelectorAll('.preset-changed').forEach(function (el) { el.classList.remove('preset-changed'); });
+        updateAllWeightBadges();
+      }
+
+      function updateWeightBadge(badgeEl) {
+        if (!badgeEl) return;
+        var id = badgeEl.getAttribute('data-weight-id');
+        var input = document.getElementById(id);
+        if (!input) return;
+        var val = parseFloat(input.value);
+        if (isNaN(val)) val = 0;
+        badgeEl.textContent = val;
+        badgeEl.classList.remove('weight-badge-std', 'weight-badge-high', 'weight-badge-low');
+        if (val > 1) badgeEl.classList.add('weight-badge-high');
+        else if (val < 1) badgeEl.classList.add('weight-badge-low');
+        else badgeEl.classList.add('weight-badge-std');
+      }
+      function updateAllWeightBadges() {
+        document.querySelectorAll('.weight-badge[data-weight-id]').forEach(updateWeightBadge);
+      }
+
+      var AGGRESSIVE_PRESET = {
+        kimp_block_pct: 5,
+        slippage_tolerance_pct: 0.2,
+        weight_price_break: 2.0,
+        weight_vol_surge: 2.5,
+        weight_strength: 2.5,
+        stop_loss_pct: -0.5,
+        time_stop_sec: 60
+      };
+      var AGGRESSIVE_PRESET_IDS = ['kimp_block_pct', 'kimp_block_pct_num', 'slippage_tolerance_pct', 'weight_price_break', 'weight_vol_surge', 'weight_strength', 'stop_loss_pct', 'time_stop_sec'];
+
+      function applyAggressivePreset() {
+        var kimp = AGGRESSIVE_PRESET.kimp_block_pct;
+        var kimpRange = document.getElementById('kimp_block_pct');
+        var kimpNum = document.getElementById('kimp_block_pct_num');
+        if (kimpRange) { kimpRange.value = kimp; markPresetChanged(kimpRange); }
+        if (kimpNum) { kimpNum.value = kimp; markPresetChanged(kimpNum); }
+        setPresetAndMark('slippage_tolerance_pct', AGGRESSIVE_PRESET.slippage_tolerance_pct);
+        setPresetAndMark('weight_price_break', AGGRESSIVE_PRESET.weight_price_break);
+        setPresetAndMark('weight_vol_surge', AGGRESSIVE_PRESET.weight_vol_surge);
+        setPresetAndMark('weight_strength', AGGRESSIVE_PRESET.weight_strength);
+        setPresetAndMark('stop_loss_pct', AGGRESSIVE_PRESET.stop_loss_pct);
+        setPresetAndMark('time_stop_sec', AGGRESSIVE_PRESET.time_stop_sec);
+        var ge = document.getElementById('greedy_enabled');
+        if (ge) { ge.checked = true; markPresetChanged(ge); }
+        var ag = document.getElementById('aggressive_mode');
+        if (ag) ag.value = '1';
+      }
+      function setPresetAndMark(id, val) {
+        var el = document.getElementById(id);
+        if (el) { el.value = val; markPresetChanged(el); }
+      }
+      function markPresetChanged(el) {
+        if (el) el.classList.add('preset-changed');
+      }
+
+      (function () {
+        var kimpRange = document.getElementById('kimp_block_pct');
+        var kimpNum = document.getElementById('kimp_block_pct_num');
+        if (kimpRange && kimpNum) {
+          kimpRange.addEventListener('input', function () { kimpNum.value = kimpRange.value; });
+          kimpNum.addEventListener('input', function () {
+            var v = parseFloat(kimpNum.value);
+            if (!isNaN(v)) { v = Math.min(20, Math.max(0.5, v)); kimpRange.value = v; kimpNum.value = v; }
+          });
+        }
+      })();
+      ['weight_price_break', 'weight_vol_surge', 'weight_obi', 'weight_strength', 'weight_spread', 'weight_depth', 'weight_kimp'].forEach(function (id) {
+        var input = document.getElementById(id);
+        var badge = document.getElementById(id + '_badge');
+        if (input && badge) {
+          input.addEventListener('input', function () { updateWeightBadge(badge); });
+          input.addEventListener('change', function () { updateWeightBadge(badge); });
+        }
+      });
+      (function () {
+        var btn = document.getElementById('btn-default-weights');
+        var defaults = { weight_price_break: 1, weight_vol_surge: 1, weight_obi: 1, weight_strength: 1, weight_spread: 0.5, weight_depth: 0.5, weight_kimp: 0.5 };
+        if (btn) btn.addEventListener('click', function () {
+          Object.keys(defaults).forEach(function (key) {
+            var el = document.getElementById(key);
+            if (el) { el.value = defaults[key]; updateWeightBadge(document.getElementById(key + '_badge')); }
+          });
+        });
+      })();
+      updateAllWeightBadges();
+      ['vol_surge_weight', 'price_break_weight', 'strength_weight'].forEach(function (id) {
+        var el = document.getElementById(id);
+        var valEl = document.getElementById(id === 'vol_surge_weight' ? 'vol_surge_value' : (id === 'price_break_weight' ? 'price_break_value' : 'strength_value'));
+        if (el && valEl) el.addEventListener('input', function () { valEl.textContent = el.value; });
+      });
+      (function () {
+        var mb = document.getElementById('max_bet_multiplier');
+        var mbV = document.getElementById('max_bet_multiplier_value');
+        if (mb && mbV) mb.addEventListener('input', function () { mbV.textContent = mb.value; });
+      })();
+
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var btn = document.getElementById('btn-apply');
+        if (btn) btn.disabled = true;
+        setStatus('적용 중…');
+        var payload = payloadFromForm();
+        socket.emit('updateConfig', payload, function (res) {
+          if (btn) btn.disabled = false;
+          document.querySelectorAll('.preset-changed').forEach(function (el) { el.classList.remove('preset-changed'); });
+          if (res && res.appliedAt) {
+            setStatus('설정이 적용되었습니다.');
+            alert('설정이 DB에 기록되었습니다. (적용 시각: ' + res.appliedAt + ')');
+          } else if (res && res.error) {
+            setStatus('저장 실패: ' + res.error, true);
+          } else {
+            setStatus('설정이 적용되었습니다.');
+          }
+        });
+      });
+
+      fetch('/api/scalp-profile')
+        .then(function (r) { return r.json(); })
+        .then(fillForm)
+        .catch(function () {
+          setStatus('프로필 로드 실패', true);
+        });
+
+      (function () {
+        var modal = document.getElementById('tooltip-modal');
+        var contentEl = document.getElementById('tooltip-modal-content');
+        var closeBtn = document.getElementById('tooltip-modal-close');
+        var isMobile = function () { return window.matchMedia('(max-width: 767px)').matches; };
+        function showTooltipContent(text) {
+          if (!contentEl) return;
+          contentEl.textContent = (text || '').replace(/\｜/g, '\n');
+          if (modal) {
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            modal.setAttribute('aria-hidden', 'false');
+          }
+        }
+        function hideTooltipModal() {
+          if (modal) {
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+            modal.setAttribute('aria-hidden', 'true');
+          }
+        }
+        document.querySelectorAll('.tooltip-trigger[data-content]').forEach(function (trigger) {
+          trigger.addEventListener('click', function (e) {
+            if (!isMobile()) return;
+            e.preventDefault();
+            e.stopPropagation();
+            showTooltipContent(trigger.getAttribute('data-content'));
+          });
+        });
+        if (closeBtn) closeBtn.addEventListener('click', hideTooltipModal);
+        if (modal) modal.addEventListener('click', function (e) { if (e.target === modal) hideTooltipModal(); });
+      })();
+
+      (function () {
+        var aggModal = document.getElementById('aggressive-strategy-modal');
+        var btnOpen = document.getElementById('btn-aggressive-preset');
+        var btnCancel = document.getElementById('aggressive-modal-cancel');
+        var btnConfirm = document.getElementById('aggressive-modal-confirm');
+        function showAggressiveModal() {
+          if (aggModal) { aggModal.classList.remove('hidden'); aggModal.classList.add('flex'); aggModal.setAttribute('aria-hidden', 'false'); }
+        }
+        function hideAggressiveModal() {
+          if (aggModal) { aggModal.classList.add('hidden'); aggModal.classList.remove('flex'); aggModal.setAttribute('aria-hidden', 'true'); }
+        }
+        if (btnOpen) btnOpen.addEventListener('click', showAggressiveModal);
+        if (btnCancel) btnCancel.addEventListener('click', hideAggressiveModal);
+        if (btnConfirm) btnConfirm.addEventListener('click', function () { applyAggressivePreset(); hideAggressiveModal(); });
+        if (aggModal) aggModal.addEventListener('click', function (e) { if (e.target === aggModal) hideAggressiveModal(); });
+      })();
+    })();
+  </script>
+</body>
+</html>

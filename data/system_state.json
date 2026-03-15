@@ -1,0 +1,13 @@
+{
+  "scalp_mode": {
+    "active": false,
+    "startTime": null,
+    "endTime": null
+  },
+  "ai_weight": [],
+  "soft_criteria": {
+    "active": false,
+    "endTime": null
+  },
+  "gemini_enabled": true
+}

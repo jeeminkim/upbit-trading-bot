@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>직접 거래 테스트 · 스캘핑 HTS</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    body { background-color: #0f172a; }
+    .toast {
+      position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%);
+      padding: 0.75rem 1.25rem; border-radius: 0.5rem; font-size: 0.875rem; font-weight: 500;
+      background: #065f46; color: #d1fae5; border: 1px solid #047857;
+      z-index: 60; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      animation: toastIn 0.25s ease-out;
+    }
+    @keyframes toastIn {
+      from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+      to { opacity: 1; transform: translateX(-50%) translateY(0); }
+    }
+    .log-success { color: #34d399; }
+    .log-error { color: #f87171; }
+    .log-info { color: #94a3b8; }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen p-4 md:p-6">
+  <div class="max-w-lg mx-auto">
+    <header class="flex items-center justify-between border-b border-slate-700 pb-4 mb-6">
+      <h1 class="text-xl font-bold text-slate-100">직접 거래 테스트</h1>
+      <nav class="flex gap-3 text-sm">
+        <a href="/" class="text-slate-400 hover:text-slate-200">메인</a>
+        <a href="/settings" class="text-slate-400 hover:text-slate-200">설정</a>
+      </nav>
+    </header>
+
+    <p class="text-amber-200/90 text-sm bg-amber-900/20 border border-amber-700/50 rounded-lg px-4 py-3 mb-6">
+      실제 자산으로 주문이 체결됩니다. API 연동 검증용으로만 사용하세요.
+    </p>
+
+    <section class="bg-slate-800 rounded-lg border border-slate-700 p-4 md:p-5 mb-6">
+      <h2 class="text-slate-300 font-medium mb-3">대상 코인</h2>
+      <div class="flex flex-wrap gap-2">
+        <button type="button" data-market="KRW-BTC" class="coin-btn px-4 py-2 rounded-lg border bg-slate-700 border-slate-600 text-slate-200 hover:border-amber-500/50 hover:bg-slate-600 transition-colors">BTC</button>
+        <button type="button" data-market="KRW-ETH" class="coin-btn px-4 py-2 rounded-lg border bg-slate-700 border-slate-600 text-slate-200 hover:border-amber-500/50 hover:bg-slate-600 transition-colors">ETH</button>
+        <button type="button" data-market="KRW-SOL" class="coin-btn px-4 py-2 rounded-lg border bg-slate-700 border-slate-600 text-slate-200 hover:border-amber-500/50 hover:bg-slate-600 transition-colors">SOL</button>
+        <button type="button" data-market="KRW-XRP" class="coin-btn px-4 py-2 rounded-lg border bg-slate-700 border-slate-600 text-slate-200 hover:border-amber-500/50 hover:bg-slate-600 transition-colors">XRP</button>
+      </div>
+      <p class="text-slate-500 text-xs mt-2">선택: <span id="selected-coin" class="text-amber-400 font-medium">KRW-BTC</span></p>
+    </section>
+
+    <section class="bg-slate-800 rounded-lg border border-slate-700 p-4 md:p-5 mb-6">
+      <h2 class="text-slate-300 font-medium mb-3">테스트 주문 금액 (원)</h2>
+      <input type="number" id="amount-krw" min="5500" step="100" value="5500" class="w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 text-slate-200 text-lg">
+      <p class="text-slate-500 text-xs mt-1">업비트 최소 5,000원 + 수수료 대비 안전마진 권장 5,500원</p>
+    </section>
+
+    <section class="bg-slate-800 rounded-lg border border-slate-700 p-4 md:p-5 mb-6">
+      <h2 class="text-slate-300 font-medium mb-3">실행</h2>
+      <div class="flex flex-wrap gap-3">
+        <button type="button" id="btn-buy" class="px-5 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-medium border border-emerald-500/50 transition-colors">⚡ 즉시 시장가 매수</button>
+        <button type="button" id="btn-sell" class="px-5 py-3 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-medium border border-rose-500/50 transition-colors">🔥 즉시 시장가 매도</button>
+      </div>
+    </section>
+
+    <section class="bg-slate-800 rounded-lg border border-slate-700 p-4 md:p-5">
+      <h2 class="text-slate-300 font-medium mb-2">실시간 통신 로그</h2>
+      <div id="manual-log" class="min-h-[120px] max-h-[280px] overflow-y-auto font-mono text-sm rounded bg-slate-900/80 border border-slate-700 p-3 space-y-1"></div>
+    </section>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script>
+    (function () {
+      var socket = io();
+      var selectedMarket = 'KRW-BTC';
+      var logEl = document.getElementById('manual-log');
+      var amountEl = document.getElementById('amount-krw');
+      var selectedCoinEl = document.getElementById('selected-coin');
+      var toastEl = document.getElementById('toast');
+
+      function appendLog(type, message) {
+        if (!logEl) return;
+        var line = document.createElement('div');
+        line.className = 'log-' + (type === 'success' ? 'success' : (type === 'error' ? 'error' : 'info'));
+        line.textContent = '[' + new Date().toLocaleTimeString('ko-KR') + '] ' + (message || '');
+        logEl.appendChild(line);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function showToast(message) {
+        if (!toastEl) return;
+        toastEl.textContent = message || '';
+        toastEl.classList.remove('hidden');
+        setTimeout(function () { toastEl.classList.add('hidden'); }, 3000);
+      }
+
+      socket.on('manualTradeLog', function (data) {
+        appendLog(data.type || 'info', data.message || '');
+        if (data.type === 'success') showToast(data.message || '');
+      });
+
+      document.querySelectorAll('.coin-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          selectedMarket = btn.getAttribute('data-market') || 'KRW-BTC';
+          if (selectedCoinEl) selectedCoinEl.textContent = selectedMarket;
+          document.querySelectorAll('.coin-btn').forEach(function (b) {
+            b.classList.remove('border-amber-500', 'bg-slate-600');
+            if (b.getAttribute('data-market') === selectedMarket) {
+              b.classList.add('border-amber-500', 'bg-slate-600');
+            }
+          });
+        });
+      });
+      document.querySelector('.coin-btn[data-market="KRW-BTC"]').classList.add('border-amber-500', 'bg-slate-600');
+
+      function confirmThen(action, label) {
+        if (!confirm('실제 자산으로 거래가 진행됩니다. 계속하시겠습니까?')) return;
+        action();
+      }
+
+      document.getElementById('btn-buy').addEventListener('click', function () {
+        var amount = parseInt(amountEl.value, 10) || 5500;
+        if (amount < 5000) {
+          appendLog('error', '주문 금액은 5,000원 이상이어야 합니다.');
+          return;
+        }
+        confirmThen(function () {
+          socket.emit('manualBuy', { market: selectedMarket, amountKrw: amount }, function (res) {
+            if (res && res.success && res.message) showToast(res.message);
+          });
+        }, '매수');
+      });
+
+      document.getElementById('btn-sell').addEventListener('click', function () {
+        confirmThen(function () {
+          socket.emit('manualSell', { market: selectedMarket }, function (res) {
+            if (res && res.success && res.message) showToast(res.message);
+          });
+        }, '매도');
+      });
+
+      amountEl.addEventListener('change', function () {
+        var v = parseInt(amountEl.value, 10);
+        if (isNaN(v) || v < 5500) amountEl.value = 5500;
+      });
+    })();
+  </script>
+</body>
+</html>

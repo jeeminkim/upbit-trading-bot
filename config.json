@@ -1,0 +1,10 @@
+{
+  "access_key": "C6Ic9l40P8xVEQKTecD29mxjnXq0OaqCFKfZGT6m",
+  "secret_key": "15TDbiwn9ibkR8wpoftWMSBenfCKnouXYaL5ghk3",
+  "api_key_file": "../upbit api.txt",
+  "watchlist": ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL"],
+  "check_interval_seconds": 60,
+  "baseline_interval_minutes": 5,
+  "change_threshold_percent": 5,
+  "use_holdings": true
+}

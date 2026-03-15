@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MPI Diagnostics</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style> body { background-color: #0f172a; } </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen p-4 md:p-6">
+  <div class="max-w-5xl mx-auto space-y-6">
+    <header class="border-b border-slate-600 pb-4 flex items-center justify-between flex-wrap gap-2">
+      <div>
+        <h1 class="text-xl font-bold text-slate-100">MPI Diagnostics</h1>
+        <p class="text-slate-400 text-sm mt-0.5">Signal 성능검진 · threshold별 win rate · 컴포넌트 중요도</p>
+      </div>
+      <nav class="flex gap-3 text-sm">
+        <a href="/meme" class="text-slate-400 hover:text-slate-200">MPI</a>
+        <span class="text-amber-400 font-medium">진단</span>
+        <a href="/meme/regime" class="text-slate-400 hover:text-slate-200">Regime</a>
+        <a href="/" class="text-slate-400 hover:text-slate-200">메인</a>
+      </nav>
+    </header>
+
+    <section>
+      <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">최근 Signal 20개</h2>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm text-left text-slate-300 border border-slate-700 rounded-lg">
+          <thead class="bg-slate-800 text-slate-400">
+            <tr>
+              <th class="p-2">id</th>
+              <th class="p-2">symbol</th>
+              <th class="p-2">detected_at</th>
+              <th class="p-2">mpi</th>
+              <th class="p-2">return_5m</th>
+              <th class="p-2">return_15m</th>
+              <th class="p-2">return_60m</th>
+              <th class="p-2">label</th>
+            </tr>
+          </thead>
+          <tbody id="signals-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div class="bg-slate-800 rounded-lg p-4 border border-slate-700">
+        <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">성공 Signal</h2>
+        <ul id="success-list" class="text-sm text-slate-300 space-y-1"></ul>
+      </div>
+      <div class="bg-slate-800 rounded-lg p-4 border border-slate-700">
+        <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">실패 Signal</h2>
+        <ul id="fail-list" class="text-sm text-slate-300 space-y-1"></ul>
+      </div>
+    </section>
+
+    <section>
+      <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">Threshold별 Win Rate</h2>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm text-left text-slate-300 border border-slate-700 rounded-lg">
+          <thead class="bg-slate-800 text-slate-400">
+            <tr>
+              <th class="p-2">threshold</th>
+              <th class="p-2">total</th>
+              <th class="p-2">success</th>
+              <th class="p-2">fail</th>
+              <th class="p-2">win_rate</th>
+              <th class="p-2">avg_return</th>
+              <th class="p-2">false_positive_rate</th>
+            </tr>
+          </thead>
+          <tbody id="threshold-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">Symbol별 통계</h2>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm text-left text-slate-300 border border-slate-700 rounded-lg">
+          <thead class="bg-slate-800 text-slate-400">
+            <tr>
+              <th class="p-2">symbol</th>
+              <th class="p-2">total</th>
+              <th class="p-2">success</th>
+              <th class="p-2">win_rate</th>
+              <th class="p-2">avg_return</th>
+            </tr>
+          </thead>
+          <tbody id="symbol-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <h2 class="text-slate-400 text-sm font-medium uppercase tracking-wider mb-3">Component Importance (성공 vs 실패 평균 차이)</h2>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm text-left text-slate-300 border border-slate-700 rounded-lg">
+          <thead class="bg-slate-800 text-slate-400">
+            <tr>
+              <th class="p-2">component</th>
+              <th class="p-2">success_avg</th>
+              <th class="p-2">fail_avg</th>
+              <th class="p-2">diff</th>
+            </tr>
+          </thead>
+          <tbody id="component-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    function formatTs(ts) {
+      if (!ts) return '—';
+      return new Date(ts * 1000).toLocaleString('ko-KR');
+    }
+    function pct(x) {
+      if (x == null || isNaN(x)) return '—';
+      return (x * 100).toFixed(2) + '%';
+    }
+    function fetchData() {
+      Promise.all([
+        fetch('/api/meme/signals?limit=20').then(r => r.json()),
+        fetch('/api/meme/diagnostics/stats').then(r => r.json())
+      ]).then(([signalsRes, statsRes]) => {
+        const signals = (signalsRes.signals || []).slice(0, 20).reverse();
+        const stats = statsRes;
+
+        const tbody = document.getElementById('signals-body');
+        tbody.innerHTML = signals.length === 0
+          ? '<tr><td colspan="8" class="p-2 text-slate-500">저장된 시그널 없음</td></tr>'
+          : signals.map(s => {
+              const ev = s.evaluation || {};
+              const label = ev.label || 'PENDING';
+              const labelClass = label === 'SUCCESS' ? 'text-emerald-400' : label === 'FAIL' ? 'text-red-400' : 'text-slate-400';
+              return '<tr class="border-t border-slate-700">' +
+                '<td class="p-2 font-mono text-xs">' + (s.id || '—') + '</td>' +
+                '<td class="p-2">' + (s.symbol || '—') + '</td>' +
+                '<td class="p-2">' + formatTs(s.detected_at) + '</td>' +
+                '<td class="p-2">' + (s.mpi != null ? s.mpi : '—') + '</td>' +
+                '<td class="p-2">' + pct(ev.return_5m) + '</td>' +
+                '<td class="p-2">' + pct(ev.return_15m) + '</td>' +
+                '<td class="p-2">' + pct(ev.return_60m) + '</td>' +
+                '<td class="p-2 ' + labelClass + '">' + label + '</td></tr>';
+            }).join('');
+
+        const successList = document.getElementById('success-list');
+        const failList = document.getElementById('fail-list');
+        const successSignals = signals.filter(s => (s.evaluation || {}).label === 'SUCCESS');
+        const failSignals = signals.filter(s => (s.evaluation || {}).label === 'FAIL');
+        successList.innerHTML = successSignals.length === 0 ? '<li class="text-slate-500">없음</li>' : successSignals.map(s => '<li>' + (s.symbol || '') + ' ' + (s.id || '') + ' ' + pct((s.evaluation || {}).return_60m) + '</li>').join('');
+        failList.innerHTML = failSignals.length === 0 ? '<li class="text-slate-500">없음</li>' : failSignals.map(s => '<li>' + (s.symbol || '') + ' ' + (s.id || '') + ' ' + pct((s.evaluation || {}).return_60m) + '</li>').join('');
+
+        const byThreshold = stats.byThreshold || {};
+        const thBody = document.getElementById('threshold-body');
+        thBody.innerHTML = [70, 80, 90].map(t => {
+          const row = byThreshold[String(t)] || {};
+          return '<tr class="border-t border-slate-700">' +
+            '<td class="p-2">' + t + '+</td>' +
+            '<td class="p-2">' + (row.total ?? '—') + '</td>' +
+            '<td class="p-2">' + (row.success ?? '—') + '</td>' +
+            '<td class="p-2">' + (row.fail ?? '—') + '</td>' +
+            '<td class="p-2">' + (row.win_rate != null ? (row.win_rate * 100).toFixed(1) + '%' : '—') + '</td>' +
+            '<td class="p-2">' + pct(row.avg_return) + '</td>' +
+            '<td class="p-2">' + (row.false_positive_rate != null ? (row.false_positive_rate * 100).toFixed(1) + '%' : '—') + '</td></tr>';
+        }).join('');
+
+        const bySymbol = stats.bySymbol || {};
+        const symBody = document.getElementById('symbol-body');
+        symBody.innerHTML = ['BTC', 'ETH', 'SOL', 'XRP'].map(sym => {
+          const row = bySymbol[sym] || {};
+          return '<tr class="border-t border-slate-700">' +
+            '<td class="p-2">' + sym + '</td>' +
+            '<td class="p-2">' + (row.total ?? '—') + '</td>' +
+            '<td class="p-2">' + (row.success ?? '—') + '</td>' +
+            '<td class="p-2">' + (row.win_rate != null ? (row.win_rate * 100).toFixed(1) + '%' : '—') + '</td>' +
+            '<td class="p-2">' + pct(row.avg_return) + '</td></tr>';
+        }).join('');
+
+        const comp = stats.componentImportance || {};
+        const compBody = document.getElementById('component-body');
+        compBody.innerHTML = ['S', 'T', 'N', 'O', 'F'].map(k => {
+          const row = comp[k] || {};
+          return '<tr class="border-t border-slate-700">' +
+            '<td class="p-2">' + k + '</td>' +
+            '<td class="p-2">' + (row.success_avg != null ? row.success_avg.toFixed(3) : '—') + '</td>' +
+            '<td class="p-2">' + (row.fail_avg != null ? row.fail_avg.toFixed(3) : '—') + '</td>' +
+            '<td class="p-2">' + (row.diff != null ? row.diff.toFixed(3) : '—') + '</td></tr>';
+        }).join('');
+      }).catch(() => {});
+    }
+    fetchData();
+    setInterval(fetchData, 15000);
+  </script>
+</body>
+</html>
