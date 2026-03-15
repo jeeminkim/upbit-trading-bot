@@ -31,6 +31,16 @@ try {
   console.error('[market-bot] server.js load failed:', e?.message || e);
   process.exit(1);
 }
+// 원인 분석용 로그 [market-bot][proxy] <tag> <detail>
+// 태그: after_require(기동 직후) | wait_handlers(대기 시작) | handlers_not_ready(미준비) | handlers_ok(정상) | withServer_error(예외)
+const PROXY_LOG = (tag, detail) => console.log('[market-bot][proxy]', tag, typeof detail === 'object' ? JSON.stringify(detail) : detail);
+PROXY_LOG('after_require', {
+  hasServer: !!server,
+  hasInitPromise: !!(server && server.initPromise),
+  hasFetchAssets: !!(server && typeof server.fetchAssets === 'function'),
+  hasDiscordHandlers: !!(server && server.discordHandlers),
+  serverKeys: server && typeof server === 'object' ? Object.keys(server).slice(0, 20) : [],
+});
 const EngineControlService = require(path.join(root, 'dist-refactor', 'packages', 'core', 'src', 'EngineControlService.js')).EngineControlService;
 const runtimeStrategyConfig = require(path.join(root, 'lib', 'runtimeStrategyConfig'));
 
@@ -171,6 +181,7 @@ app.post('/sell-all', async (req, res) => {
 });
 
 // ——— Discord 패널 복구: 역할 A/B/C 버튼용 proxy (discordHandlers 호출) ———
+const PROXY_NOT_READY_MSG = 'market-bot이 서버 초기화 중입니다. 1~2분 후 다시 시도하세요.';
 // initPromise 완료 후 discordHandlers가 IIFE 내부에서 설정되므로 요청 시 최대 15초 대기
 async function waitForDiscordHandlers(maxMs) {
   const step = 400;
@@ -185,19 +196,33 @@ async function waitForDiscordHandlers(maxMs) {
 
 function withServer(fn) {
   return async (req, res) => {
+    const path = req.path || req.url || '';
+    const t0 = Date.now();
     try {
       const init = server && (server.initPromise || server.init);
-      if (init && typeof init.then === 'function') await init;
+      const hadInit = !!(init && typeof init.then === 'function');
+      if (hadInit) await init;
       let h = server && server.discordHandlers;
-      if (!h) h = await waitForDiscordHandlers(5000);
+      const waitedMs = hadInit ? Date.now() - t0 : 0;
       if (!h) {
-        return res.status(503).json({
-          error: 'discordHandlers not ready',
-          message: 'market-bot이 서버 초기화 중입니다. 1~2분 후 다시 시도하세요.',
+        PROXY_LOG('wait_handlers', { path, hadInit, waitedMs });
+        h = await waitForDiscordHandlers(5000);
+      }
+      const totalMs = Date.now() - t0;
+      if (!h) {
+        PROXY_LOG('handlers_not_ready', { path, totalMs, hasServer: !!server, hasInitPromise: !!(server && server.initPromise) });
+        // 무조건 응답: 200 + 안내 메시지 (오류 대신 안내로 표시)
+        return res.status(200).json({
+          content: PROXY_NOT_READY_MSG,
+          description: PROXY_NOT_READY_MSG,
+          title: '준비 중',
+          _proxyNotReady: true,
         });
       }
+      PROXY_LOG('handlers_ok', { path, totalMs });
       return await fn(req, res, h);
     } catch (e) {
+      PROXY_LOG('withServer_error', { path, error: (e && e.message) || String(e) });
       res.status(500).json({ error: (e && e.message) || 'Unknown' });
     }
   };

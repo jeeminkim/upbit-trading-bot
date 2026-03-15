@@ -33,6 +33,34 @@ const fs = require('fs');
 const serverLock = require('./lib/serverLock');
 const SERVER_LOCK_PATH = path.join(__dirname, '.server.lock');
 let _exportDiscordHandlers = null; // require 시 engine-standalone 등에서 사용
+const PROXY_NOT_READY_MSG = 'market-bot이 서버 초기화 중입니다. 1~2분 후 다시 시도하세요.';
+function createDiscordHandlersProxy() {
+  const target = { _real: null };
+  const stubContent = () => Promise.resolve({ content: PROXY_NOT_READY_MSG, description: PROXY_NOT_READY_MSG, title: '준비 중' });
+  const stubEmbed = () => Promise.resolve({ type: 'rich', title: '준비 중', description: PROXY_NOT_READY_MSG });
+  const stubs = {
+    analyst: {
+      diagnoseNoTrade: stubEmbed,
+      suggestLogic: stubEmbed,
+      advisorOneLiner: stubContent,
+      dailyLogAnalysis: stubContent,
+    },
+    aiAutoAnalysis: stubContent,
+    getApiUsageMonitor: stubContent,
+    adminGitPullRestart: () => Promise.resolve({ content: PROXY_NOT_READY_MSG }),
+    adminSimpleRestart: () => Promise.resolve({ content: PROXY_NOT_READY_MSG }),
+  };
+  const defaultStub = () => Promise.resolve({ content: PROXY_NOT_READY_MSG, message: PROXY_NOT_READY_MSG });
+  return new Proxy(target, {
+    get(t, prop) {
+      if (prop === '_real') return t._real;
+      if (t._real && t._real[prop] !== undefined) return t._real[prop];
+      if (stubs[prop]) return stubs[prop];
+      if (prop === 'analyst' && stubs.analyst) return stubs.analyst;
+      return defaultStub;
+    },
+  });
+}
 /** graceful shutdown 시 lock 해제용 (require.main === module 일 때만 설정) */
 let _releaseLockRef = null;
 // lock은 engine을 실행하는 프로세스(market-bot / engine-standalone)에서만 사용. api-server가 server.js를 require할 때는 lock 하지 않음.
@@ -3482,7 +3510,13 @@ const initPromise = (async () => {
 
   if (require.main !== module) {
     _exportDiscordHandlers = discordHandlers;
-    module.exports.discordHandlers = discordHandlers;
+    if (module.exports.discordHandlers && typeof module.exports.discordHandlers._real === 'object') {
+      module.exports.discordHandlers._real = discordHandlers;
+      console.log('[server][require] discordHandlers._real set (IIFE reached, proxy now delegates)');
+    } else {
+      module.exports.discordHandlers = discordHandlers;
+      console.log('[server][require] discordHandlers set on module.exports (IIFE reached)');
+    }
   }
 
   if (require.main === module) {
@@ -3618,8 +3652,13 @@ if (require.main !== module) {
   exp.upbit = upbit;
   exp.TradeExecutor = TradeExecutor;
   exp.db = db;
-  // discordHandlers는 IIFE 내부(3485)에서만 설정 — 여기서 넣으면 아직 null이라 덮어쓰지 않음
+  exp.discordHandlers = createDiscordHandlersProxy();
   module.exports = exp;
+  console.log('[server][require] sync export done', {
+    hasInitPromise: typeof exp.initPromise !== 'undefined',
+    hasFetchAssets: typeof exp.fetchAssets === 'function',
+    hasDiscordHandlers: !!exp.discordHandlers,
+  });
 }
 }
 

@@ -31,35 +31,23 @@ function toDiscordComponents(rows) {
     });
 }
 /**
- * Discord API에 보낼 컴포넌트는 type/style이 숫자여야 클라이언트에 버튼이 표시됨.
- * panelContract의 ActionRowPayload는 이미 API 형식(type: 1, type: 2, style: number)이므로 그대로 사용.
+ * 역할 패널 메시지 전송. 새 메시지는 channel.send(content, components)로 보내 Discord.js 직렬화를 사용해 버튼이 확실히 렌더되게 함.
+ * (raw API 전송 시 일부 환경에서 components가 반영되지 않는 경우가 있어, 기본은 channel.send 사용)
  */
-function sendRolePanelMessageWithRawPayload(channel, content, rawComponents, role, messageId) {
-    const client = channel?.client;
-    if (!client?.api) {
-        return Promise.reject(new Error('channel.client.api not available'));
+async function sendRolePanelMessage(channel, content, rawComponents, role, messageId) {
+    if (!rawComponents || rawComponents.length === 0) {
+        return Promise.reject(new Error('sendRolePanelMessage: components must be non-empty array'));
     }
-    const data = { content, components: rawComponents };
-    panelRestoreWarn('ROLE_PANEL_RAW_API_PAYLOAD', {
-        role,
-        contentLen: content.length,
-        componentRowCount: rawComponents.length,
-        firstRowButtonCount: rawComponents[0]?.components?.length ?? 0,
-        firstButton: rawComponents[0]?.components?.[0]
-            ? { type: rawComponents[0].components[0].type, style: rawComponents[0].components[0].style, custom_id: rawComponents[0].components[0].custom_id, label: rawComponents[0].components[0].label }
-            : null,
-    });
+    const discordComponents = toDiscordComponents(rawComponents);
     if (messageId) {
-        return client.api
-            .channels(channel.id)
-            .messages(messageId)
-            .patch({ data })
-            .then((d) => ({ id: d.id }));
+        const msg = await channel.messages.fetch(messageId).catch(() => null);
+        if (msg) {
+            await msg.edit({ content, components: discordComponents });
+            return { id: messageId };
+        }
     }
-    return client.api
-        .channels(channel.id)
-        .messages.post({ data })
-        .then((d) => ({ id: d.id }));
+    const sent = await channel.send({ content, components: discordComponents });
+    return { id: sent.id };
 }
 const LOG_TAG = 'DISCORD_OP';
 /** PANEL_RESTORE 진단 로그 — LOG_LEVEL 무관하게 항상 출력 (logWarn 사용) */
@@ -446,12 +434,10 @@ async function restoreOrCreateRolePanels(channel) {
             role,
             contentLen: content.length,
             componentRowCount: components.length,
-            rawTypes: components.map((r) => ({ rowType: r.type, buttonStyles: r.components.map((c) => c.style) })),
         });
-        // Discord 클라이언트는 "편집으로 추가한" 컴포넌트를 렌더하지 않는 경우가 있음.
-        // 버튼이 보이도록 항상 새 메시지로 전송하고, 기존 패널 메시지는 삭제.
+        // channel.send({ content, components }) 사용 — Discord.js 직렬화로 버튼이 확실히 렌더되게 함.
         let finalId;
-        const sent = await sendRolePanelMessageWithRawPayload(channel, content, components, role);
+        const sent = await sendRolePanelMessage(channel, content, components, role);
         finalId = sent.id;
         if (role === 'A')
             result.roleA = 'new';
@@ -474,25 +460,19 @@ async function restoreOrCreateRolePanels(channel) {
             const verifyRows = verifyMsg.components?.length ?? 0;
             const verifyCounts = (verifyMsg.components ?? []).map((ar) => ar.components?.length ?? 0);
             const firstCustomIds = (verifyMsg.components ?? [])
-                .slice(0, 2)
+                .slice(0, 3)
                 .flatMap((ar) => (ar.components ?? []).map((c) => c.customId ?? c.custom_id).filter(Boolean));
-            const verifyShape = (verifyMsg.components ?? []).map((ar) => ({
-                type: ar.type,
-                componentCount: ar.components?.length ?? 0,
-                customIds: (ar.components ?? []).map((c) => c.customId ?? c.custom_id).filter(Boolean),
-            }));
             panelRestoreWarn('ROLE_PANEL_VERIFY', {
                 role,
                 messageId: finalId,
                 componentRowCount: verifyRows,
                 componentCounts: verifyCounts,
-                firstCustomIds: firstCustomIds.slice(0, 5),
-                verifyShape,
+                firstCustomIds: firstCustomIds.slice(0, 10),
             });
             if (verifyRows === 0) {
                 panelRestoreWarn('ROLE_PANEL_VERIFY_FAIL', { role, messageId: finalId, willSendNew: true });
-                const sent = await sendRolePanelMessageWithRawPayload(channel, content, components, role);
-                finalId = sent.id;
+                const sentRetry = await sendRolePanelMessage(channel, content, components, role);
+                finalId = sentRetry.id;
                 state[messageIdKey] = finalId;
                 if (role === 'A')
                     result.roleA = 'new';
@@ -501,6 +481,19 @@ async function restoreOrCreateRolePanels(channel) {
                 else
                     result.roleC = 'new';
                 panelRestoreWarn('ROLE_PANEL_SEND_AFTER_VERIFY_FAIL', { role, messageId: finalId });
+                const verifyAgain = await channel.messages.fetch(finalId);
+                const againRows = verifyAgain.components?.length ?? 0;
+                panelRestoreWarn('ROLE_PANEL_VERIFY', {
+                    role,
+                    messageId: finalId,
+                    componentRowCount: againRows,
+                    componentCounts: (verifyAgain.components ?? []).map((ar) => ar.components?.length ?? 0),
+                    firstCustomIds: (verifyAgain.components ?? [])
+                        .slice(0, 3)
+                        .flatMap((ar) => (ar.components ?? []).map((c) => c.customId ?? c.custom_id).filter(Boolean))
+                        .slice(0, 10),
+                    afterRetry: true,
+                });
             }
             else {
                 state[messageIdKey] = finalId;

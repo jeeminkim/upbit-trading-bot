@@ -19,6 +19,7 @@ npm run pm2:refactor
 ```
 
 - TypeScript 빌드 후 api-server, discord-operator, market-bot 을 PM2 로 기동.
+- **실제 실행 파일**: discord-operator는 `dist-refactor/apps/discord-operator/src/index.js` 를 실행함. `src/` 수정 후 반드시 `npm run build:refactor` 또는 `npm run pm2:refactor` 로 빌드해야 최신 코드가 반영됨.
 - 매매 엔진은 **자동으로 시작되지 않음**. Discord `/engine start` 또는 대시보드에서 명시적으로 시작해야 함.
 
 ---
